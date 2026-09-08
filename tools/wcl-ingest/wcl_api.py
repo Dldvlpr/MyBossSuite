@@ -525,6 +525,29 @@ query($code: String!, $fight: Int!) {
 """
 
 
+def token_scopes(token: str) -> list:
+    """Lit les scopes ACCORDES dans le corps du JWT. Diagnostic uniquement.
+
+    WCL ne renvoie pas les scopes dans la reponse OAuth (`scope` est null) : le
+    seul endroit ou l'accorde est lisible, c'est la charge utile du jeton. On la
+    decode sans verifier la signature — on ne fait confiance a rien ici, on
+    AFFICHE, pour distinguer "scope refuse" de "droit refuse".
+    """
+    parts = token.split(".")
+    if len(parts) < 2:
+        return []
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)  # base64url sans padding
+    try:
+        body = json.loads(base64.urlsafe_b64decode(payload.encode()))
+    except Exception:  # noqa: BLE001 - un jeton illisible n'est pas une panne
+        return []
+    scopes = body.get("scopes") or body.get("scope") or []
+    if isinstance(scopes, str):
+        scopes = scopes.split()
+    return list(scopes)
+
+
 CURRENT_USER_QUERY = """
 query {
   userData {

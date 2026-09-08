@@ -74,6 +74,7 @@ from wcl_api import (  # noqa: E402
     fetch_phase_transitions,
     load_credentials,
     parse_report_arg,
+    token_scopes,
 )
 
 # Au-dela de cet ecart-type (en secondes) sur les deltas, le timing est traite
@@ -797,7 +798,18 @@ def main(argv=None) -> int:
                   "accorde les scopes attendus (%s). Supprime %s et recommence."
                   % (" ".join(SCOPES), TOKEN_CACHE_NAME), file=sys.stderr)
             return 2
-        print("compte : %s (id %s)" % (user.get("name", "?"), user.get("id", "?")))
+        print("compte  : %s (id %s)" % (user.get("name", "?"), user.get("id", "?")))
+        granted = token_scopes(token)
+        print("scopes  : %s" % (" ".join(granted) if granted else "(illisibles)"))
+        missing = [s for s in SCOPES if s not in granted]
+        if granted and missing:
+            print("manquant: %s — reautorise apres avoir supprime %s"
+                  % (" ".join(missing), TOKEN_CACHE_NAME))
+        elif granted:
+            print("Les scopes sont complets. Si un rapport archive reste refuse, "
+                  "c'est un droit du COMPTE qui manque, pas l'autorisation : "
+                  "verifie que %s est bien l'abonne, en ouvrant un de ces rapports "
+                  "sur le site." % user.get("name", "?"))
         return 0
 
     out = resolve_out(args)

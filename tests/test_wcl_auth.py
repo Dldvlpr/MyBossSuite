@@ -149,6 +149,24 @@ finally:
     wcl_api.ACTIVE_API_URL = before
 
 print()
+print("lecture des scopes accordes (JWT)")
+
+import base64  # noqa: E402 - local au bloc de diagnostic
+
+
+def jwt(body):
+    raw = base64.urlsafe_b64encode(json.dumps(body).encode()).decode().rstrip("=")
+    return "entete.%s.signature" % raw
+
+
+ok(wcl_api.token_scopes(jwt({"scopes": ["view-user-profile", "view-private-reports"]}))
+   == ["view-user-profile", "view-private-reports"], "scopes lus dans le corps du JWT")
+ok(wcl_api.token_scopes(jwt({"scope": "a b"})) == ["a", "b"], "forme chaine acceptee")
+ok(wcl_api.token_scopes(jwt({})) == [], "JWT sans scopes : liste vide")
+ok(wcl_api.token_scopes("pas-un-jwt") == [], "jeton opaque : liste vide, pas d'exception")
+ok(wcl_api.token_scopes("a.!!!.c") == [], "corps illisible : liste vide, pas d'exception")
+
+print()
 print("detection du rapport archive")
 
 archived = [{"message": "This report has been archived. Subscribing users can access "
