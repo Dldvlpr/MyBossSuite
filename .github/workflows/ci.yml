@@ -20,5 +20,6 @@ jobs:
       - name: Outils Python
         run: |
           python3 -m py_compile tools/wcl-ingest/wcl_ingest.py \
-              tools/wcl-ingest/wcl_api.py tools/wcl-ingest/wcl_alerts.py
+              tools/wcl-ingest/wcl_api.py tools/wcl-ingest/wcl_alerts.py \
+              tools/wcl-ingest/wcl_phases.py
           python3 -m py_compile tools/wa-extract/wa_extract.py tools/wa-extract/lua_table.py
