@@ -123,6 +123,49 @@ Un timer `PULL` restreint à des phases n'est programmé à l'engage que s'il es
 actif en phase 1 ; pour un timer relatif à l'entrée dans une phase, utiliser
 `PHASE`.
 
+## Régénération
+
+`tools/wcl-ingest/wcl_ingest.py` **fusionne** avec le fichier existant au lieu
+de l'écraser :
+
+| | |
+|---|---|
+| Réécrits à chaque passage | `repeatInterval`, `variable`, et le `time` des timers `PULL` |
+| Conservés | tout le reste : le tableau `phases`, `trigger`, `phase`, `threshold`, `name`, `announce`, `flash`, `on`, `warnBefore`, `once`, `testTime`, `color`, `kind`, `zone`, `instanceId`… |
+| Conservés tels quels | les timers dont le sort est absent des logs de ce passage, signalés par un commentaire `-- conserve :` |
+| Ajoutés en fin de liste | les sorts jamais vus jusqu'ici, là où on les remarque |
+
+Sans cette fusion, éditer un fichier serait jetable et un boss à phases ne
+serait jamais régénérable — l'ingestion en masse s'arrêterait au premier boss
+non trivial.
+
+Ce qu'il faut savoir :
+
+- **Le tableau `phases` n'est jamais touché.** C'est la mécanique du combat,
+  pas une mesure : le générateur ne sait pas la produire et n'a pas le droit de
+  l'effacer.
+- **Seul un timer `PULL` reçoit le `time` mesuré**, parce que la mesure est un
+  delta depuis le pull. Un timer `PHASE` compte depuis l'entrée dans sa phase,
+  une origine que l'ingestion ne sait pas encore situer dans un log : son
+  `time` reste écrit à la main et le timer reste `provisional`. C'est ce qui
+  permet à un même sort de porter un timer par phase — Flame Breath en P1 et en
+  P3 — sans que la mesure de la P1 écrase le timing de la P3.
+- **La cadence, elle, ne dépend pas de l'origine** : `repeatInterval` et
+  `variable` sont réécrits sur tous les timers du sort, quelle que soit leur
+  phase.
+- Un timer `PULL` qui reçoit une mesure perd son `provisional` : il n'est plus
+  provisoire, il est mesuré.
+- Un timer basculé en `CAST`, `AURA`, `EMOTE` ou `DEATH` ne garde pas de
+  `time` : le champ est mort pour ces triggers.
+- L'ordre du fichier est préservé d'un passage à l'autre, pour que les diffs
+  restent lisibles. La régénération est idempotente : deux passages avec les
+  mêmes mesures donnent le même octet.
+- Le bandeau de commentaires en tête appartient au générateur et est réécrit ;
+  ce qui doit survivre va dans un champ, pas dans un commentaire.
+
+`--replace` écrase sans fusionner. Un fichier que le parseur ne sait pas relire
+arrête le passage **avant** tout appel API, plutôt que d'être écrasé.
+
 ## Vérification
 
 `/mbs test boss <npcId>` rejoue la timeline hors combat, phases comprises :
