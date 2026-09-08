@@ -484,7 +484,7 @@ query($code: String!, $fight: Int!) {
 # variables : ce sont des enums GraphQL, pas des String, et les parametrer
 # demanderait une query par combinaison.
 EVENTS_QUERY = """
-query($code: String!, $fight: Int!, $start: Float, $filter: String) {
+query($code: String!, $fight: Int!, $start: Float, $end: Float, $filter: String) {
   reportData {
     report(code: $code) {
       events(
@@ -492,6 +492,7 @@ query($code: String!, $fight: Int!, $start: Float, $filter: String) {
         hostilityType: %(hostility)s
         fightIDs: [$fight]
         startTime: $start
+        endTime: $end
         filterExpression: $filter
         limit: 10000
       ) {
@@ -626,10 +627,14 @@ def fetch_fight(token: str, code: str, fight_id: int):
     return fights[0], actors, abilities
 
 
-def fetch_events(token: str, code: str, fight_id: int, start: float,
+def fetch_events(token: str, code: str, fight_id: int, start: float, end: float,
                  data_type: str, hostility: str = "Enemies",
                  filter_expression: str | None = None):
     """Pagine `events` jusqu'au bout — un pull long depasse la limite d'une page.
+
+    Les DEUX bornes sont obligatoires : `fightIDs` seul ne suffit pas a delimiter
+    la fenetre, et une requete sans `endTime` rend zero evenement — sans erreur,
+    ce qui la rend indiscernable d'un combat vide.
 
     `filter_expression` est evalue par WCL, donc il economise le transfert et
     pas seulement le traitement : sur les degats d'un raid entier, la difference
@@ -640,7 +645,8 @@ def fetch_events(token: str, code: str, fight_id: int, start: float,
     events, cursor = [], start
     while cursor is not None:
         data = graphql(token, query, {"code": code, "fight": fight_id,
-                                      "start": cursor, "filter": filter_expression})
+                                      "start": cursor, "end": end,
+                                      "filter": filter_expression})
         block = data["reportData"]["report"]["events"]
         events.extend(block["data"] or [])
         cursor = block.get("nextPageTimestamp")

@@ -98,11 +98,12 @@ PHASE_INTERVAL_STDEV = 1.5
 PHASE_HINT_SHARE = 0.6
 
 
-def fetch_casts(token: str, code: str, fight_id: int, start: float):
-    return fetch_events(token, code, fight_id, start, "Casts", "Enemies")
+def fetch_casts(token: str, code: str, fight_id: int, start: float, end: float):
+    return fetch_events(token, code, fight_id, start, end, "Casts", "Enemies")
 
 
-def fetch_boss_damage(token: str, code: str, fight_id: int, start: float, target_ids):
+def fetch_boss_damage(token: str, code: str, fight_id: int, start: float, end: float,
+                      target_ids):
     """Degats subis par le boss — c'est ce qui porte sa vie, donc sa courbe.
 
     Le filtre est evalue par WCL : sans lui on rapatrie les degats de tout le
@@ -111,10 +112,10 @@ def fetch_boss_damage(token: str, code: str, fight_id: int, start: float, target
     """
     expression = " or ".join("target.id = %d" % actor_id for actor_id in sorted(target_ids))
     try:
-        return fetch_events(token, code, fight_id, start, "DamageDone", "Friendlies",
+        return fetch_events(token, code, fight_id, start, end, "DamageDone", "Friendlies",
                             expression or None)
     except WCLError:
-        return fetch_events(token, code, fight_id, start, "DamageDone", "Friendlies")
+        return fetch_events(token, code, fight_id, start, end, "DamageDone", "Friendlies")
 
 
 def needs_health_curve(phases) -> bool:
@@ -158,7 +159,8 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
     for code, fight_id in reports:
         try:
             fight, actors, _ = fetch_fight(token, code, fight_id)
-            events = fetch_casts(token, code, fight_id, float(fight["startTime"]))
+            events = fetch_casts(token, code, fight_id, float(fight["startTime"]),
+                                 float(fight["endTime"]))
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} ignore ({exc})", file=sys.stderr)
             continue
@@ -273,7 +275,8 @@ def situate_phases(token, code, fight_id, fight, actors, npc_id, phases,
         target_ids = [actor_id for actor_id, actor in actors.items()
                       if actor.get("gameID") == npc_id] if npc_id is not None else []
         try:
-            damage = fetch_boss_damage(token, code, fight_id, pull, target_ids)
+            damage = fetch_boss_damage(token, code, fight_id, pull,
+                                       float(fight["endTime"]), target_ids)
             curve = wcl_phases.health_curve(damage, actors, npc_id, pull)
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} : courbe de vie indisponible ({exc})",

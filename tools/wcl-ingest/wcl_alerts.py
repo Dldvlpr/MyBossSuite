@@ -124,7 +124,7 @@ def collect_interrupts(token, reports, npc_id, verbose):
             fight, actors, abilities = fetch_fight(token, code, fight_id)
             # hostilityType Friendlies : la source d'un kick est un joueur.
             events = fetch_events(token, code, fight_id, float(fight["startTime"]),
-                                  "Interrupts", "Friendlies")
+                                  float(fight["endTime"]), "Interrupts", "Friendlies")
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} ignore ({exc})", file=sys.stderr)
             continue
@@ -246,8 +246,9 @@ def collect_zones(token, reports, npc_id, verbose):
         try:
             fight, actors, abilities = fetch_fight(token, code, fight_id)
             start = float(fight["startTime"])
-            damage = fetch_events(token, code, fight_id, start, "DamageTaken", "Friendlies")
-            debuffs = fetch_events(token, code, fight_id, start, "Debuffs", "Friendlies")
+            end = float(fight["endTime"])
+            damage = fetch_events(token, code, fight_id, start, end, "DamageTaken", "Friendlies")
+            debuffs = fetch_events(token, code, fight_id, start, end, "Debuffs", "Friendlies")
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} ignore ({exc})", file=sys.stderr)
             continue

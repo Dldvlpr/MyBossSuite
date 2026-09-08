@@ -106,6 +106,15 @@ else
 fi
 
 echo
+echo "== ingestion WCL (fenetre temporelle des events, sans reseau)"
+if output=$(python3 tests/test_wcl_events.py 2>&1); then
+    echo "  ok   $(printf '%s' "$output" | tail -n 1)"
+else
+    printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
+    status=1
+fi
+
+echo
 echo "== ingestion WCL (OAuth utilisateur, sans reseau)"
 if output=$(python3 tests/test_wcl_auth.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
