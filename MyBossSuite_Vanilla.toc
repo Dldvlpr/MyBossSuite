@@ -1,4 +1,4 @@
-## Interface: 11507
+## Interface: 11509
 ## Title: MyBossSuite
 ## Notes: Boss timers, swing timer, alerte kick et alerte move (GTFO) dans un seul addon modulaire.
 ## Author: Dldvlpr

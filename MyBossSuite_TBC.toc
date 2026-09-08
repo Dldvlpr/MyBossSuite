@@ -1,4 +1,4 @@
-## Interface: 20504
+## Interface: 20506
 ## Title: MyBossSuite
 ## Notes: Boss timers, swing timer, alerte kick et alerte move (GTFO) dans un seul addon modulaire.
 ## Author: Dldvlpr

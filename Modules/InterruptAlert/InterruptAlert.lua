@@ -354,7 +354,13 @@ M.UNIT_SPELLCAST_INTERRUPTIBLE     = M.UNIT_SPELLCAST_START
 M.UNIT_SPELLCAST_NOT_INTERRUPTIBLE = M.UNIT_SPELLCAST_START
 
 function M:UNIT_SPELLCAST_STOP(_, unit)
-    if IsWatched(unit) then self:Evaluate() end
+    if not IsWatched(unit) then return end
+    -- Le client a vu la fin de l'incantation : l'entree du repli combat log
+    -- pour cette unite n'a plus lieu d'etre. Sans ca, un cast de PNJ annule par
+    -- un stun ou la mort de sa cible (SPELL_CAST_FAILED n'est jamais logge pour
+    -- un PNJ) ressortirait en alerte fantome jusqu'a FALLBACK_CAST_MAX.
+    ClearCast(UnitGUID(unit))
+    self:Evaluate()
 end
 
 M.UNIT_SPELLCAST_CHANNEL_STOP = M.UNIT_SPELLCAST_STOP

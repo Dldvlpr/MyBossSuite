@@ -30,6 +30,19 @@ local BAR_COLOR      = { 0.25, 0.55, 0.9 }
 
 local HEALTH_POLL_INTERVAL = 0.5
 
+-- Sortie de combat du joueur != fin du combat (mort, feign death, le raid qui
+-- continue). Quand ni ENCOUNTER_END ni la mort du boss ne tranchent, on tranche
+-- sur le groupe : tout le monde mort = wipe ; personne en combat mais des
+-- vivants = on attend que le boss se taise BOSS_IDLE_TIMEOUT secondes.
+local WIPE_CHECK_INTERVAL = 2
+local BOSS_IDLE_TIMEOUT   = 15
+
+local BOSS_UNITS     = { "boss1", "boss2", "boss3", "boss4", "boss5" }
+local FALLBACK_UNITS = { "target", "focus", "mouseover" }
+
+local UnitIsDeadOrGhost   = _G.UnitIsDeadOrGhost
+local UnitAffectingCombat = _G.UnitAffectingCombat
+
 --------------------------------------------------------------------------------
 -- Etat de pull
 --------------------------------------------------------------------------------
@@ -39,6 +52,59 @@ M.bossGUID      = nil
 M.castTriggers  = nil    -- [spellId] = timerDef, construit une fois a l'engage
 M.healthTriggers = nil
 M.pullTime      = 0
+M.lastBossActivity = 0   -- dernier event de combat log emis par le boss
+
+--------------------------------------------------------------------------------
+-- GUID
+--------------------------------------------------------------------------------
+
+local NpcIdFromGUID = ns.NpcIdFromGUID
+
+-- Memoisation du parsing de GUID : la meme poignee de GUID revient des milliers
+-- de fois par pull.
+local npcIdCache = {}
+local npcIdCacheCount = 0
+
+local function CachedNpcId(guid)
+    if not guid then return nil end
+    local cached = npcIdCache[guid]
+    if cached ~= nil then return cached or nil end
+    if npcIdCacheCount > 800 then
+        wipe(npcIdCache)
+        npcIdCacheCount = 0
+    end
+    local npcId = NpcIdFromGUID(guid) or false
+    npcIdCache[guid] = npcId
+    npcIdCacheCount = npcIdCacheCount + 1
+    return npcId or nil
+end
+
+--- GUID d'une unite visible dont le npcId est celui du boss : frames boss en
+-- Cata+/retail, cible/focus/mouseover ailleurs. nil si rien n'est visible.
+function M:FindBossGUID(npcId)
+    if ns.has.bossUnitFrames then
+        for i = 1, #BOSS_UNITS do
+            local unit = BOSS_UNITS[i]
+            if UnitExists(unit) and CachedNpcId(UnitGUID(unit)) == npcId then
+                return UnitGUID(unit)
+            end
+        end
+    end
+    for i = 1, #FALLBACK_UNITS do
+        local unit = FALLBACK_UNITS[i]
+        if UnitExists(unit) and CachedNpcId(UnitGUID(unit)) == npcId then
+            return UnitGUID(unit)
+        end
+    end
+    return nil
+end
+
+--- Le boss s'est revele (combat log, frame boss) apres un engage sans GUID.
+function M:IdentifyBoss(guid)
+    if not guid or self.bossGUID then return end
+    self.bossGUID = guid
+    EventBus:Fire("BOSS_IDENTIFIED", self.engaged, guid)
+end
 
 --------------------------------------------------------------------------------
 -- Groupes de bars
@@ -75,6 +141,44 @@ function M:CreateSavedOverrideGroups()
             self:GetGroup(anchorKey)
         end
     end
+end
+
+--- Ancre dediee a un sort : ses barres quittent l'ancre generique pour une
+-- frame a part, deplacable en mode unlock. C'est ce que ns:ResolveAnchorKey
+-- consulte ; sans cette commande la mecanique n'etait atteignable nulle part.
+function M:AddOverrideAnchor(spellId)
+    if not ns.db or not spellId then return nil end
+    local anchorKey = "BossTimer_Alert_" .. spellId
+    local group = self:GetGroup(anchorKey)
+    if not ns.db.anchors[anchorKey] then group:SaveAnchor() end
+    return anchorKey, group
+end
+
+function M:RemoveOverrideAnchor(spellId)
+    if not ns.db or not spellId then return false end
+    local anchorKey = "BossTimer_Alert_" .. spellId
+    if not ns.db.anchors[anchorKey] then return false end
+    ns.db.anchors[anchorKey] = nil
+    local group = Bars.groups[anchorKey]
+    if group then
+        group:StopAll()
+        ns.Anchors:Unregister(anchorKey)
+        group:Hide()
+        -- Une frame ne se detruit pas : on la laisse orpheline et cachee.
+        Bars.groups[anchorKey] = nil
+    end
+    return true
+end
+
+function M:ListOverrideAnchors()
+    local out = {}
+    if not ns.db then return out end
+    for anchorKey in pairs(ns.db.anchors) do
+        local spellId = anchorKey:match("^BossTimer_Alert_(%d+)$")
+        if spellId then out[#out + 1] = tonumber(spellId) end
+    end
+    table.sort(out)
+    return out
 end
 
 function M:ClearBars()
@@ -125,8 +229,9 @@ function M:FireTimer(def)
     EventBus:Fire("BOSS_TIMER_FIRED", def)
 
     local config = self:GetConfig()
-    if config and config.sound and _G.PlaySound and _G.SOUNDKIT then
-        PlaySound(SOUNDKIT.RAID_WARNING, "Master")
+    if config and config.sound then
+        -- Par Compat, comme tout son de l'addon : un kit absent ne casse rien.
+        ns.PlayAlertSound("raidwarning", "Master")
     end
 
     if def.repeatInterval and not def.once then
@@ -172,6 +277,7 @@ function M:Engage(npcId, guid)
     self.def      = def
     self.bossGUID = guid
     self.pullTime = GetTime()
+    self.lastBossActivity = self.pullTime
     self.castTriggers, self.healthTriggers = BuildLookups(def)
 
     self:StartPullTimers(def)
@@ -213,17 +319,68 @@ end
 
 function M:ENCOUNTER_START(_, encounterId)
     local npcId = BossTimerEncounter[tonumber(encounterId) or -1]
-    if npcId then self:Engage(npcId, nil) end
+    if not npcId then return end
+    -- ENCOUNTER_START ne livre pas de GUID : on le cherche sur les frames boss
+    -- tout de suite, et le combat log le fournira sinon (BOSS_IDENTIFIED).
+    self:Engage(npcId, self:FindBossGUID(npcId))
 end
 
 function M:ENCOUNTER_END()
     self:Disengage()
 end
 
+--- Etat du groupe, joueur compris : (quelqu'un de vivant, quelqu'un en combat).
+local function GroupState()
+    local anyAlive, anyFighting = false, false
+    local function Look(unit)
+        if not UnitExists(unit) then return end
+        if UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit) then return end
+        anyAlive = true
+        if UnitAffectingCombat and UnitAffectingCombat(unit) then anyFighting = true end
+    end
+    if ns.IsInRaidGroup() then
+        for i = 1, ns.GetNumGroupMembers() do Look("raid" .. i) end
+    else
+        Look("player")
+        for i = 1, ns.GetNumGroupMembers() - 1 do Look("party" .. i) end
+    end
+    return anyAlive, anyFighting
+end
+
+--- Le combat est-il vraiment termine ? Appele quand le joueur sort de combat,
+-- puis toutes les WIPE_CHECK_INTERVAL secondes tant que la reponse est non.
+function M:IsFightOver()
+    -- Solo : sortir de combat, c'est la fin (boss reset ou joueur mort).
+    if ns.GetNumGroupMembers() == 0 then return true end
+    local anyAlive, anyFighting = GroupState()
+    if not anyAlive then return true end       -- wipe
+    if anyFighting then return false end       -- le raid continue sans toi
+    -- Des vivants mais personne en combat : boss reset, ou tout le monde a fui.
+    -- On laisse au boss le temps de se taire avant de conclure.
+    return GetTime() - self.lastBossActivity >= BOSS_IDLE_TIMEOUT
+end
+
 function M:PLAYER_REGEN_ENABLED()
-    -- Fin de combat = wipe ou kill : dans les deux cas les timers du pull
-    -- precedent doivent mourir avant le suivant.
-    self:Disengage()
+    if not self.engaged then return end
+    -- Mort du joueur, feign death, ou le raid qui continue : la sortie de
+    -- combat du joueur ne dit pas que le pull est fini. Les timers restent,
+    -- et un check periodique tranche sur l'etat du groupe et du boss.
+    if self:IsFightOver() then
+        self:Disengage()
+        return
+    end
+    self:Repeat("wipeCheck", WIPE_CHECK_INTERVAL, function()
+        if not self.engaged then
+            self:CancelTimer("wipeCheck")
+        elseif self:IsFightOver() then
+            self:Disengage()
+        end
+    end)
+end
+
+function M:PLAYER_REGEN_DISABLED()
+    -- De retour en combat (rez, fin de feign death) : plus rien a surveiller.
+    self:CancelTimer("wipeCheck")
 end
 
 --------------------------------------------------------------------------------
@@ -231,26 +388,6 @@ end
 --------------------------------------------------------------------------------
 
 local CombatLogGetCurrentEventInfo = CombatLogGetCurrentEventInfo
-local NpcIdFromGUID = ns.NpcIdFromGUID
-
--- Memoisation du parsing de GUID : la meme poignee de GUID revient des milliers
--- de fois par pull.
-local npcIdCache = {}
-local npcIdCacheCount = 0
-
-local function CachedNpcId(guid)
-    if not guid then return nil end
-    local cached = npcIdCache[guid]
-    if cached ~= nil then return cached or nil end
-    if npcIdCacheCount > 800 then
-        wipe(npcIdCache)
-        npcIdCacheCount = 0
-    end
-    local npcId = NpcIdFromGUID(guid) or false
-    npcIdCache[guid] = npcId
-    npcIdCacheCount = npcIdCacheCount + 1
-    return npcId or nil
-end
 
 local function OnCombatLog()
     local _, sub, _, srcGUID, _, _, _, dstGUID, _, _, _, spellId = CombatLogGetCurrentEventInfo()
@@ -263,9 +400,13 @@ local function OnCombatLog()
             return
         end
 
-        if sub ~= "SPELL_CAST_START" and sub ~= "SPELL_CAST_SUCCESS" then return end
         if srcGUID ~= M.bossGUID and CachedNpcId(srcGUID) ~= M.engaged then return end
-        if not M.bossGUID then M.bossGUID = srcGUID end
+        -- Tout ce que le boss fait compte comme activite : c'est ce qui permet
+        -- de conclure a un reset quand plus personne n'est en combat.
+        M.lastBossActivity = GetTime()
+        if not M.bossGUID then M:IdentifyBoss(srcGUID) end
+
+        if sub ~= "SPELL_CAST_START" and sub ~= "SPELL_CAST_SUCCESS" then return end
 
         local def = M.castTriggers[spellId]
         if def then M:OnBossCast(def, sub) end
@@ -310,9 +451,6 @@ end
 -- boss occupe une frame surveillee. On resout l'unite explicitement, et on
 -- assume : les seuils HEALTH sont structurellement moins fiables en classic, ou
 -- il n'existe pas d'unite boss dediee.
-
-local BOSS_UNITS = { "boss1", "boss2", "boss3", "boss4", "boss5" }
-local FALLBACK_UNITS = { "target", "focus", "mouseover" }
 
 function M:ResolveBossUnit()
     if ns.has.bossUnitFrames then
@@ -464,7 +602,12 @@ function M:OnEnable()
     end
     self:RegisterRawEvent("COMBAT_LOG_EVENT_UNFILTERED", OnCombatLog)
     self:RegisterEvent("PLAYER_REGEN_ENABLED")
+    self:RegisterEvent("PLAYER_REGEN_DISABLED")
     self:RegisterMessage("TEST_STOPPED", function() self:StopTestBoss() end)
+
+    -- Les ancres dediees du profil courant (un changement de profil redemarre
+    -- le module sans repasser par OnInitialize).
+    self:CreateSavedOverrideGroups()
 
     local problems = self:ValidateData()
     if problems > 0 then

@@ -119,21 +119,31 @@ end
 local CombatLogGetCurrentEventInfo = CombatLogGetCurrentEventInfo
 
 local function OnCombatLog()
-    local _, sub, _, srcGUID, _, _, _, dstGUID, _, _, _, missType = CombatLogGetCurrentEventInfo()
+    local _, sub, _, srcGUID, _, _, _, dstGUID, _, _, _, p12, p13, _, _, _, _, _, _, _, p21 =
+        CombatLogGetCurrentEventInfo()
 
     -- SWING_DAMAGE_LANDED existe en retail et double-compterait : le test strict
     -- sur l'egalite le gere, un find("SWING") non.
     local isDamage = (sub == "SWING_DAMAGE")
     if not isDamage and sub ~= "SWING_MISSED" then return end
 
-    if not isDamage and missType == "PARRY" and ns.has.parryHaste then
-        -- dstGUID est l'unite qui a pare : c'est SON swing qui est raccourci.
+    if not isDamage and p12 == "PARRY" and ns.has.parryHaste then
+        -- dstGUID est l'unite qui a pare : c'est SON swing qui est raccourci,
+        -- que le coup pare vienne de la main droite ou de la main gauche.
         if dstGUID == playerGUID then
             ApplyParryHaste(M:GetPlayerGroup(), PLAYER_ANCHOR)
         elseif dstGUID == targetGUID then
             ApplyParryHaste(M:GetTargetGroup(), TARGET_ANCHOR)
         end
     end
+
+    -- La barre suit la main droite uniquement. Un coup de main gauche ne doit
+    -- surtout pas la relancer, sinon un double-wield a une barre fausse en
+    -- permanence. `isOffHand` est le 21e argument de SWING_DAMAGE et le 13e de
+    -- SWING_MISSED, sur tous les clients depuis 1.13 / 8.0.
+    local isOffHand
+    if isDamage then isOffHand = p21 else isOffHand = p13 end
+    if isOffHand == true then return end
 
     if srcGUID == playerGUID then
         local speed = UnitAttackSpeed("player")
@@ -210,11 +220,16 @@ function M:OnEnable()
     self:RegisterEvent("PLAYER_TARGET_CHANGED")
     self:RegisterEvent("PLAYER_REGEN_DISABLED")
     self:RegisterEvent("PLAYER_REGEN_ENABLED")
-    self:RegisterMessage("BOSS_ENGAGED", function(_, _, guid)
+    -- BOSS_ENGAGED peut arriver sans GUID (ENCOUNTER_START ne le donne pas) :
+    -- BOSS_IDENTIFIED le fournit des que le combat log ou une frame boss le
+    -- revele, et on se verrouille a ce moment-la.
+    local function LockOnBoss(_, _, guid)
         if not guid then return end
         self.lockedToBoss = true
         self:SetTrackedUnit(guid)
-    end)
+    end
+    self:RegisterMessage("BOSS_ENGAGED", LockOnBoss)
+    self:RegisterMessage("BOSS_IDENTIFIED", LockOnBoss)
     self:RegisterMessage("BOSS_DISENGAGED", function()
         self.lockedToBoss = false
         self:PLAYER_TARGET_CHANGED()

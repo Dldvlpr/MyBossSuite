@@ -301,4 +301,9 @@ end
 
 ns.EventBus:On("PROFILE_CHANGED", function()
     Anchors:ReloadAll()
+    -- L'etat unlock est dans le profil : le nouveau profil fait foi.
+    local wantUnlocked = (ns.db and ns.db.locked == false) or false
+    if wantUnlocked ~= (Anchors.unlocked == true) then
+        if wantUnlocked then Anchors:Unlock() else Anchors:Lock() end
+    end
 end)
