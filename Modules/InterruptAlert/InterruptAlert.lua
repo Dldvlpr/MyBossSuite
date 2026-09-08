@@ -294,24 +294,52 @@ function M:Evaluate()
         return self:ClearAlert()
     end
 
-    self:ShowAlert(unit, name, icon, spellId, assumed)
+    self:ShowAlert(unit, name, icon, spellId, assumed, self:RotationHolder(unit, spellId))
 end
 
+--- Le joueur a qui la rotation d'interrupt donne ce kick, ou nil : module de
+-- rotation absent ou eteint, aucune rotation possible, ou c'est ton tour.
+-- Le couplage ne va que dans ce sens : sans le module de rotation, l'alerte est
+-- exactement celle de toujours.
+function M:RotationHolder(unit, spellId)
+    local rotation = ns:GetModule("interruptRotation")
+    if not rotation or not rotation.isEnabled or not rotation.Holder then return nil end
+    return rotation:Holder(unit .. "|" .. tostring(spellId))
+end
+
+-- Le tour de quelqu'un d'autre s'affiche gris, sans son ni flash.
+local HOLD_COLOR = { 0.55, 0.55, 0.6 }
+
 --- Une signature par incantation : le meme cast ne doit pas rejouer le son ni
--- reflasher a chaque tick du ticker.
-function M:ShowAlert(unit, name, icon, spellId, assumed)
-    local signature = unit .. "|" .. tostring(spellId or name)
+-- reflasher a chaque tick du ticker. Le tour en fait partie — quand la rotation
+-- rend la main au milieu de l'incantation, l'alerte doit repasser en KICK.
+function M:ShowAlert(unit, name, icon, spellId, assumed, holder)
+    local signature = unit .. "|" .. tostring(spellId or name) .. "|" .. tostring(holder)
     if self.showing == signature then return end
     self.showing = signature
 
-    Alerts:Show(ALERT_KEY, {
-        sticky   = true,
-        icon     = icon,
-        -- Le point d'interrogation dit la verite : l'incantation vient du combat
-        -- log, rien ne prouve qu'elle soit interruptible.
-        subtitle = assumed and (name .. " |cffaaaaaa(?)|r") or name,
-    })
-    ns.EventBus:Fire("INTERRUPT_ALERT", unit, spellId, name)
+    -- Le point d'interrogation dit la verite : l'incantation vient du combat
+    -- log, rien ne prouve qu'elle soit interruptible.
+    local subtitle = assumed and (name .. " |cffaaaaaa(?)|r") or name
+
+    if holder then
+        -- On n'efface pas l'incantation pour autant : le joueur designe peut
+        -- etre mort, silence ou hors de portee. La rotation rend la main d'elle
+        -- meme au bout de son delai, et l'alerte redevient un KICK franc.
+        Alerts:Show(ALERT_KEY, {
+            sticky   = true,
+            icon     = icon,
+            text     = "ATTENDS",
+            color    = HOLD_COLOR,
+            subtitle = ("%s |cffaaaaaa— au tour de %s|r"):format(subtitle, holder),
+            silent   = true,
+            quiet    = true,
+        })
+    else
+        Alerts:Show(ALERT_KEY, { sticky = true, icon = icon, subtitle = subtitle })
+    end
+
+    ns.EventBus:Fire("INTERRUPT_ALERT", unit, spellId, name, holder)
 end
 
 function M:ClearAlert()

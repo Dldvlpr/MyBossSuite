@@ -21,13 +21,14 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 3c | Extraction depuis DBM/BigWigs | **fermée** — les deux sont *All Rights Reserved*, pas GPL |
 | 4 | Module Swing Timer | fait |
 | 5 | Module CD Tracker | fait, sur les 6 flavors — voir la note ci-dessous |
-| 6 | Module Interrupt Rotation | non fait — dépend de la phase 5 |
+| 6 | Module Interrupt Rotation | fait — repose sur la phase 5 |
 | 7 | `Core/Alerts.lua`, alerte Kick, alerte Move (GTFO) | fait |
 | 7b | `tools/wcl-ingest/wcl_alerts.py` (data kick + move) | outil écrit, **data à générer** |
 
-Livrable atteint : **un addon installable, configurable, avec cinq modules
-fonctionnels** (Swing Timer, Boss Timer, CD Tracker, alerte Kick, alerte Move),
-plutôt que six modules à moitié faits.
+Livrable atteint : **un addon installable, configurable, avec six modules
+fonctionnels** (Swing Timer, Boss Timer, CD Tracker, rotation d'interrupt,
+alerte Kick, alerte Move). Ce qui manque encore ne tient plus au code, mais à la
+**data** : voir « Limites assumées ».
 
 Le CD Tracker ne s'appuie pas sur LibOpenRaid pour fonctionner, parce qu'elle ne
 se charge pas hors retail. Il repose sur le fait que **chaque client connaît son
@@ -84,6 +85,18 @@ chaque client charge celui qui correspond à son suffixe.
 | `/mbs cd list` | cooldowns connus, triés par temps restant, avec leur source |
 | `/mbs cd sync` | annonce les tiens et demande les leurs |
 | `/mbs cd barres\|annonce\|soi\|kick\|estimes on\|off` | barres à l'écran, diffusion de tes cooldowns, s'afficher soi-même, suivre les interrupts, afficher les estimations |
+
+### Rotation d'interrupt
+
+| Commande | Effet |
+|---|---|
+| `/mbs rotation` (ou `/mbs rot`) | porteurs connus, joueur désigné, dernier kick vu, réglages |
+| `/mbs rotation list` | la file dans l'ordre du tour, avec l'attente de chacun |
+| `/mbs rotation reset` | remet la file à son début (le tour repart du premier) |
+| `/mbs rotation cadre on\|off` | affiche ou masque le cadre de file |
+| `/mbs rotation combat on\|off` | n'afficher le cadre qu'en combat (par défaut oui) |
+| `/mbs rotation retenue on\|off` | l'alerte kick dit « ATTENDS » quand le tour est à un autre |
+| `/mbs rotation delai <s>` | délai avant de rendre la main à tout le monde (0 = jamais) |
 
 ### Alertes (kick, move et annonce boss)
 
@@ -146,6 +159,22 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   écoute `SPELL_CAST_SUCCESS`, pas `SPELL_INTERRUPT` : un kick lancé dans le vide
   part quand même en cooldown mais ne génère aucun `SPELL_INTERRUPT`, et écouter
   le mauvais événement ferait croire le sort encore disponible.
+* **`Modules/InterruptRotation/InterruptRotation.lua`** — à qui le tour, et
+  surtout quand se taire. Le module ne mesure rien : il ordonne ce que le CD
+  Tracker sait, et n'existe donc que là où celui-ci tourne. Deux règles le
+  portent. **`SPELL_CAST_SUCCESS`, jamais `SPELL_INTERRUPT`** — un kick lancé
+  dans le vide part quand même en cooldown sans générer d'`SPELL_INTERRUPT`, et
+  écouter le mauvais événement désignerait un joueur qui n'a plus son kick.
+  **« Je ne sais pas » n'est pas « c'est prêt »** — un joueur qui n'a jamais
+  annoncé son interrupt n'entre pas dans la file, n'est jamais désigné, et ne
+  fait donc jamais taire personne. L'ordre est le tri **par nom** des porteurs :
+  `party1` n'est pas le même joueur pour toi et pour moi, alors que le tri par
+  nom donne le même ordre sur tous les clients, sans un message réseau de plus.
+  Quand le tour est à un autre, l'alerte kick affiche « ATTENDS » en gris, sans
+  son — et redevient un `KICK` franc si l'incantation dure encore après le délai
+  de remise en jeu (1,2 s par défaut) : un kick manqué coûte plus cher qu'un kick
+  en double. Le module publie `INTERRUPT_ROTATION_ADVANCED` sur l'EventBus à
+  chaque tour qui passe.
 * **`Core/Comm.lua`** — messages addon entre joueurs du groupe. Préfixe `MBS`,
   canal choisi seul (`INSTANCE_CHAT`, `RAID`, `PARTY`), messages typés en
   champs séparés par des tabulations, version de protocole en tête : deux
@@ -302,6 +331,20 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   classe ; **aucun fichier n'est livré**, et c'est voulu : une estimation ne vaut
   d'être écrite que si elle est juste. Rien n'est donc affiché comme estimé
   aujourd'hui — tout ce que tu vois vient de son propriétaire.
+* **La rotation d'interrupt ne voit que ceux qui parlent** — même limite que le
+  CD Tracker, dont elle est la lecture ordonnée : un joueur qui ne fait tourner
+  ni MyBossSuite ni (en retail) un addon à LibOpenRaid n'entre pas dans la file.
+  C'est la bonne réponse : le désigner serait envoyer quelqu'un dont on ne sait
+  rien. Elle ne connaît pas non plus la portée ni la ligne de vue du joueur
+  désigné, et ne peut donc pas savoir qu'il est hors de portée du caster — c'est
+  exactement ce que rattrape le délai de remise en jeu, qui rend la main à tout
+  le monde si rien n'est parti. `/mbs rotation delai 0` supprime ce filet, et
+  `/mbs rotation retenue off` supprime la retenue de l'alerte.
+* **Ordre identique sur tous les clients, à une réserve près** : le tri par nom
+  est déterministe, mais chaque client ne connaît que les porteurs qui *lui* ont
+  parlé. Deux joueurs qui n'ont pas reçu les mêmes annonces peuvent brièvement
+  voir deux files différentes, le temps qu'un `/mbs cd sync` (ou l'arrivée dans
+  le groupe) remette tout le monde d'accord.
 * **Homonymes dans le CD Tracker** : un nom reçu dans un message addon est
   recollé sur le joueur du roster, y compris quand l'un porte son royaume et pas
   l'autre. Deux homonymes de royaumes différents dans le même groupe ne sont pas
@@ -388,7 +431,7 @@ tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion 
 Prérequis : `lua5.1` (ou `lua`) et `python3` dans le `PATH`.
 
 La suite charge le vrai code dans un mock d'API WoW et pilote le temps à la
-main : elle vérifie le socle et les cinq modules sur client classic **et**
+main : elle vérifie le socle et les six modules sur client classic **et**
 retail, avec et sans `C_Timer`. Le moteur de rencontre y est joué de bout en
 bout sur un raid (Onyxia et ses trois phases), un donjon (difficulté, joueur
 mort pendant que le groupe se bat, wipe) et un world boss (engage par un autre
@@ -408,6 +451,14 @@ hiérarchie des sources (une estimation ne parle pas par-dessus une mesure),
 throttle des demandes d'état, oubli d'un joueur qui quitte le groupe, et lecture
 défensive de LibOpenRaid — dont la doc se contredit sur l'ordre de ses retours,
 donc une valeur incohérente est ignorée plutôt qu'affichée.
+
+La rotation d'interrupt est jouée sur ce qui la rend juste ou dangereuse : un
+joueur qui n'a rien annoncé n'entre pas dans la file, un `SPELL_INTERRUPT` ne
+fait pas tourner le tour (seul un `SPELL_CAST_SUCCESS` le fait), un kick en
+cooldown est sauté, personne de prêt veut dire « débrouillez-vous » et non
+« attendez », l'alerte kick passe en « ATTENDS » puis redevient un `KICK` franc
+quand le délai de remise en jeu est écoulé, et mourir en plein pull ne fait
+disparaître ni la file ni le tour tant que le groupe se bat.
 
 Les numéros `## Interface` des six `.toc` sont dans `tools/gen-toc.sh` ; ils
 sont à bumper à chaque patch client, sinon l'addon apparaît comme obsolète.

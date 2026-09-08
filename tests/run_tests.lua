@@ -62,6 +62,7 @@ local FILES = {
     "Modules/InterruptAlert/InterruptAlert.lua",
     "Modules/MoveAlert/MoveAlert.lua",
     "Modules/CDTracker/CDTracker.lua",
+    "Modules/InterruptRotation/InterruptRotation.lua",
     -- Les fichiers de data se chargent en dernier, comme dans un .toc.
     "Modules/BossTimer/Data/vanilla/Onyxias_Lair/Onyxia.lua",
     "Modules/BossTimer/Data/vanilla/Blasted_Lands/Lord_Kazzak.lua",
@@ -1420,6 +1421,176 @@ Mock.addonMessages = {}
 Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. KICK .. "\t12\t15", "PARTY", "Tank")
 equal(cd:Remaining("Tank", KICK), nil, "et plus personne n'ecoute")
 Mock.cooldowns[KICK] = nil
+
+--------------------------------------------------------------------------------
+
+suite("Rotation d'interrupt")
+
+-- La rotation ne mesure rien : elle ordonne ce que le CD Tracker sait deja. Ce
+-- qui merite d'etre teste, c'est donc ce qui separe une rotation utile d'une
+-- rotation dangereuse : qui elle designe, qui elle refuse de designer, ce qui
+-- fait tourner le tour — et ce qui NE le fait pas tourner.
+
+local rot = ns:GetModule("interruptRotation")
+local COUNTERSPELL = 2139
+
+Mock.units.party1 = { guid = "Player-0-0002", name = "Tank" }
+Mock.units.party2 = { guid = "Player-0-0003", name = "Heal" }
+-- Un joueur sans addon : il ne dira jamais rien de son kick.
+Mock.units.party3 = { guid = "Player-0-0004", name = "Muet" }
+Mock.groupSize = 4
+Mock.inRaid = false
+
+ns:SetModuleEnabled("cdTracker", true)
+ns:SetModuleEnabled("interruptRotation", true)
+Mock.Advance(4)   -- l'annonce d'arrivee du CD Tracker part avec un decalage
+
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. COUNTERSPELL .. "\t0\t0\tinterrupt",
+    "PARTY", "Tank")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. KICK .. "\t0\t0\tinterrupt",
+    "PARTY", "Heal")
+
+--- « Je ne sais pas » n'est pas « c'est pret » : un joueur muet n'entre pas dans
+-- la file. Le designer serait le bug qui tue le module — l'interrupt passerait a
+-- travers, et personne ne saurait pourquoi.
+local order = rot:Order()
+equal(#order, 3, "trois porteurs d'interrupt : le joueur muet n'en est pas")
+equal(order[1].unit, "Heal", "l'ordre est alphabetique, donc identique sur tous les clients")
+equal(order[3].unit, "Testeur", "et le joueur lui-meme en fait partie")
+ok(rot:IsActive(), "deux porteurs suffisent a faire une rotation")
+
+--- Le tour, et ce qu'il fait a l'alerte kick.
+equal(rot:Designated().unit, "Heal", "le premier de la file prend le premier kick")
+equal(rot:Holder("target|17086"), "Heal", "ce n'est pas ton tour : l'alerte doit se taire")
+
+-- Mais pas indefiniment : le designe peut etre mort, silence ou hors de portee.
+-- Un kick manque coute plus cher qu'un kick en double.
+Mock.Advance(1.5)
+equal(rot:Holder("target|17086"), nil,
+    "l'incantation dure toujours : la rotation rend la main a tout le monde")
+equal(rot:Holder("target|18435"), "Heal", "nouvelle incantation : l'attente repart de zero")
+
+--- Ce qui fait tourner la file : SPELL_CAST_SUCCESS, et rien d'autre.
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", "Player-0-0003", BOSS_GUID, KICK)
+equal(rot.lastCaster, "Heal", "un interrupt lance fait tourner la file")
+equal(rot:Designated().unit, "Tank", "le tour passe au suivant")
+
+-- Un kick lance dans le vide part en cooldown sans generer le moindre
+-- SPELL_INTERRUPT : ecouter cet evenement-la designerait un joueur qui n'a plus
+-- son kick.
+Mock.FireCombatLog("SPELL_INTERRUPT", "Player-0-0002", BOSS_GUID, COUNTERSPELL)
+equal(rot.lastCaster, "Heal", "SPELL_INTERRUPT ne fait rien tourner")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", "Player-0-0002", BOSS_GUID, 17086)
+equal(rot.lastCaster, "Heal", "un sort qui n'est pas un interrupt non plus")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, KICK)
+equal(rot.lastCaster, "Heal", "ni un cast venu de hors du groupe")
+
+--- Un kick en cooldown est saute : la file designe qui peut, pas qui vient.
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. COUNTERSPELL .. "\t20\t24\tinterrupt",
+    "PARTY", "Tank")
+equal(rot:Designated().unit, "Testeur", "le suivant en cooldown est saute")
+equal(rot:Holder("target|17086"), nil, "c'est ton tour : l'alerte reste franche")
+
+--- Personne de pret : ca veut dire « debrouillez-vous », pas « attendez ».
+Mock.cooldowns[KICK] = { start = Mock.now, duration = 15 }
+cd:ReadOwn(KICK, "interrupt")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. KICK .. "\t12\t15\tinterrupt",
+    "PARTY", "Heal")
+equal(rot:Designated(), nil, "aucun kick pret : la rotation ne designe personne")
+equal(rot:Holder("target|17086"), nil, "... et ne fait donc taire personne")
+
+Mock.cooldowns[KICK] = nil
+cd:ReadOwn(KICK, "interrupt")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. KICK .. "\t0\t0\tinterrupt",
+    "PARTY", "Heal")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. COUNTERSPELL .. "\t0\t0\tinterrupt",
+    "PARTY", "Tank")
+rot:Reset()
+
+--- Ce que ca donne a l'ecran, avec le module d'alerte kick : le couplage ne va
+-- que dans ce sens, et il ne remplace jamais l'alerte par du silence.
+ns:SetModuleEnabled("interruptAlert", true)
+Mock.units.target = { guid = BOSS_GUID, name = "Onyxia", health = 100, healthMax = 100 }
+Mock.FireEvent("PLAYER_TARGET_CHANGED")
+Mock.SetCast("target", 17086, false)
+Mock.FireEvent("UNIT_SPELLCAST_START", "target")
+ok(kickDisplay:IsShown(), "incantation interruptible : l'alerte s'affiche quand meme")
+equal(kickDisplay.text:GetText(), "ATTENDS", "mais elle dit d'attendre au lieu de crier KICK")
+ok(kickDisplay.subtitle:GetText():find("Heal", 1, true) ~= nil,
+    "et nomme celui a qui le kick revient")
+Mock.Advance(1.5)
+equal(kickDisplay.text:GetText(), "KICK",
+    "le kick designe n'est pas parti : l'alerte redevient franche")
+
+Mock.SetCast("target", nil)
+Mock.FireEvent("UNIT_SPELLCAST_STOP", "target")
+ns:SetModuleEnabled("interruptAlert", false)
+
+--- Le cadre de file : en combat seulement, et remis a zero au wipe comme au kill.
+equal(rot.listFrame:IsShown(), false, "hors combat, le cadre ne s'affiche pas")
+Mock.units.player.combat = true
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+ok(rot.listFrame:IsShown(), "en combat, la file s'affiche")
+ok(rot.listFrame.lines[1]:GetText():find("Heal", 1, true) ~= nil, "le designe en tete")
+
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", "Player-0-0003", BOSS_GUID, KICK)
+ok(rot.listFrame.lines[1]:GetText():find("Tank", 1, true) ~= nil,
+    "et la file se reordonne des qu'un kick part")
+
+-- Sortir de combat n'est pas la fin du combat : PLAYER_REGEN_ENABLED tombe aussi
+-- quand tu meurs pendant que le raid continue. La file disparaitrait alors au
+-- moment exact ou elle sert le plus.
+Mock.units.party1.combat = true
+Mock.units.player.combat = false
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+ok(rot.listFrame:IsShown(), "joueur mort, groupe toujours en combat : la file reste")
+equal(rot.lastCaster, "Heal", "et le tour n'est pas remis a zero")
+
+Mock.units.party1.combat = false
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+equal(rot.listFrame:IsShown(), false, "fin de combat du groupe : cadre masque")
+equal(rot.lastCaster, nil, "et la file repart du debut au pull suivant")
+
+--- Commandes.
+Mock.printed = {}
+SlashCmdList["MYBOSSSUITE"]("rotation")
+ok(Mock.FindPrinted("Rotation d'interrupt"), "/mbs rotation affiche l'etat")
+Mock.printed = {}
+SlashCmdList["MYBOSSSUITE"]("rot list")
+ok(Mock.FindPrinted("Heal"), "/mbs rot list montre la file")
+SlashCmdList["MYBOSSSUITE"]("rotation cadre off")
+equal(ns.db.modules.interruptRotation.list, false, "/mbs rotation cadre off")
+SlashCmdList["MYBOSSSUITE"]("rotation cadre on")
+SlashCmdList["MYBOSSSUITE"]("rotation delai 0")
+equal(ns.db.modules.interruptRotation.handoff, 0,
+    "/mbs rotation delai 0 — la retenue ne rend jamais la main")
+SlashCmdList["MYBOSSSUITE"]("rotation delai 1.2")
+
+--- La liste des porteurs est tenue en cache (l'alerte kick la relit cinq fois
+-- par seconde) : un joueur qui s'annonce en plein combat doit y entrer aussitot,
+-- sans attendre un changement de groupe.
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. COUNTERSPELL .. "\t0\t0\tinterrupt",
+    "PARTY", "Muet")
+equal(#rot:Order(), 4, "un joueur qui s'annonce entre dans la file sans attendre")
+
+--- Seul, il n'y a pas de rotation : rien ne doit retenir quoi que ce soit.
+Mock.units.party1, Mock.units.party2, Mock.units.party3 = nil, nil, nil
+Mock.groupSize = 0
+Mock.FireEvent("GROUP_ROSTER_UPDATE")
+equal(rot:IsActive(), false, "sans groupe, aucune rotation")
+equal(rot:Holder("target|17086"), nil, "et plus rien ne retient l'alerte")
+
+--- Sans CD Tracker, la rotation n'a aucune source — et le dit, au lieu de
+-- laisser croire a un ordre qu'elle n'a pas.
+ns:SetModuleEnabled("cdTracker", false)
+equal(#rot:Order(), 0, "CD Tracker eteint : plus aucune source")
+ok(rot:StatusLines()[1]:find("CD Tracker", 1, true) ~= nil, "et le statut le dit")
+
+--- Desactivation complete.
+ns:SetModuleEnabled("interruptRotation", false)
+equal(rot.listFrame:IsShown(), false, "module eteint : cadre masque")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", "Player-0-0002", BOSS_GUID, COUNTERSPELL)
+equal(rot.lastCaster, nil, "et plus personne n'ecoute le combat log")
 
 --------------------------------------------------------------------------------
 
