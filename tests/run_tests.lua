@@ -50,6 +50,7 @@ local FILES = {
     "Core/Compat.lua",
     "Core/Scheduler.lua",
     "Core/EventBus.lua",
+    "Core/Comm.lua",
     "Core/DB.lua",
     "Core/Anchors.lua",
     "Core/Bars.lua",
@@ -561,6 +562,138 @@ end
 
 --------------------------------------------------------------------------------
 
+suite("Synchronisation")
+Mock.groupSize = 5
+Mock.units.target = { guid = BOSS_GUID, name = "Onyxia", health = 100, healthMax = 100 }
+Mock.addonMessages = {}
+
+-- Engage local : le groupe est prevenu, avec l'heure du pull et la phase.
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 12345)
+equal(boss.engaged, 10184, "engage local")
+local last = Mock.LastAddonMessage()
+ok(last ~= nil and last.prefix == "MBS", "engage : message addon envoye")
+equal(last and last.message, "1\tPULL\t10184\t0\t1\t0", "PULL avec l'heure du pull et la phase")
+equal(last and last.channel, "PARTY", "canal du groupe")
+
+-- Un pair a vu le pull 4 s avant nous : on adopte son heure.
+Mock.Advance(2)
+local remainingBefore = generic:GetBar("t1"):GetRemaining()
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPULL\t10184\t6\t1\t6", "PARTY", "Autre-Mock")
+equal(Mock.now - boss.pullTime, 6, "heure du pull du pair adoptee")
+equal(generic:GetBar("t1"):GetRemaining(), remainingBefore - 4, "timer PULL rapproche d'autant")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPULL\t10184\t7\t1\t7", "PARTY", "Autre-Mock")
+equal(Mock.now - boss.pullTime, 6, "ecart sous la tolerance ignore")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPULL\t10184\t1\t1\t1", "PARTY", "Autre-Mock")
+equal(Mock.now - boss.pullTime, 6, "un pull plus tardif ne fait pas reculer le notre")
+
+-- Phase recue d'un pair : appliquee, sans echo.
+local sentBefore = #Mock.addonMessages
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPHASE\t10184\t2\t3", "PARTY", "Autre-Mock")
+equal(boss.phase, 2, "phase recue appliquee")
+equal(Mock.now - boss.phaseTime, 3, "heure d'entree de phase du pair adoptee")
+equal(generic:GetBar("t1"), nil, "timers de phase 1 coupes")
+equal(#Mock.addonMessages, sentBefore, "phase synchronisee : pas d'echo")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPHASE\t10184\t1\t0", "PARTY", "Autre-Mock")
+equal(boss.phase, 2, "retour en arriere sur un seuil de vie refuse")
+
+-- Phase detectee localement : diffusee.
+Mock.units.target.health = 35
+Mock.Advance(1)
+equal(boss.phase, 3, "phase 3 detectee localement")
+last = Mock.LastAddonMessage()
+equal(last and last.message, "1\tPHASE\t10184\t3\t0", "changement de phase local diffuse")
+
+-- Demande d'etat : on repond, sauf si quelqu'un vient de le faire.
+Mock.addonMessages = {}
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tREQ", "PARTY", "Nouveau-Mock")
+Mock.Advance(2.1)
+last = Mock.LastAddonMessage()
+ok(last ~= nil and last.message:find("^1\tPULL\t10184\t") ~= nil, "reponse PULL a une demande d'etat")
+Mock.addonMessages = {}
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", ("1\tPULL\t10184\t%d\t3\t0"):format(Mock.now - boss.pullTime),
+    "PARTY", "Autre-Mock")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tREQ", "PARTY", "Nouveau-Mock")
+Mock.Advance(0.1)
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", ("1\tPULL\t10184\t%d\t3\t0"):format(Mock.now - boss.pullTime),
+    "PARTY", "Autre-Mock")
+Mock.Advance(2.1)
+equal(#Mock.addonMessages, 0, "un pair a repondu entre-temps : silence")
+
+-- Ce qui doit etre ignore : soi-meme, une autre version, un autre prefixe.
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tEND\t10184\tkill", "PARTY", "Testeur-Mock")
+equal(boss.engaged, 10184, "ses propres messages sont ignores")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "2\tEND\t10184\tkill", "PARTY", "Autre-Mock")
+equal(boss.engaged, 10184, "autre version de protocole ignoree")
+Mock.FireEvent("CHAT_MSG_ADDON", "DBMv4", "1\tEND\t10184\tkill", "PARTY", "Autre-Mock")
+equal(boss.engaged, 10184, "autre prefixe ignore")
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tEND\t99001\tkill", "PARTY", "Autre-Mock")
+equal(boss.engaged, 10184, "kill d'un autre boss ignore")
+
+-- Kill vu par un pair hors de notre portee de combat log.
+Mock.printed = {}
+Mock.addonMessages = {}
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tEND\t10184\tkill", "PARTY", "Autre-Mock")
+equal(boss.engaged, nil, "kill recu : rencontre terminee")
+ok(Mock.FindPrinted("kill"), "resume de kill")
+equal(#Mock.addonMessages, 0, "kill synchronise : pas d'echo")
+
+-- Arrivee en cours de combat : engage sans le moindre event de combat log.
+Mock.addonMessages = {}
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPULL\t10184\t30\t2\t5", "PARTY", "Autre-Mock")
+equal(boss.engaged, 10184, "engage par synchronisation")
+equal(Mock.now - boss.pullTime, 30, "heure du pull du pair")
+equal(boss.phase, 2, "phase du pair")
+equal(Mock.now - boss.phaseTime, 5, "heure d'entree de phase du pair")
+equal(generic:GetBar("t1"), nil, "timer de phase 1 absent en phase 2")
+ok(boss.phaseFrame:IsShown(), "cadre affiche")
+equal(#Mock.addonMessages, 0, "engage synchronise : pas d'echo")
+
+-- Kill local : diffuse.
+Mock.FireCombatLog("UNIT_DIED", nil, BOSS_GUID)
+equal(boss.engaged, nil, "kill local")
+last = Mock.LastAddonMessage()
+equal(last and last.message, "1\tEND\t10184\tkill", "kill local diffuse")
+
+-- Timer repetitif recale sur le bon cycle : pull il y a 30 s, Flame Breath a
+-- 12 puis toutes les 25 s -> prochaine occurrence a 37 s, dans 7 s.
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPULL\t10184\t30\t1\t30", "PARTY", "Autre-Mock")
+equal(boss.phase, 1, "phase 1 du pair")
+equal(generic:GetBar("t1"):GetRemaining(), 7, "timer repetitif recale sur le bon cycle")
+boss:Disengage("manual")
+
+-- Solo : rien a envoyer, et rien ne casse.
+Mock.groupSize = 1
+Mock.addonMessages = {}
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 12345)
+equal(boss.engaged, 10184, "engage solo")
+equal(#Mock.addonMessages, 0, "solo : aucun message")
+boss:Disengage("manual")
+
+-- Synchronisation coupee : ni envoi ni reception.
+Mock.groupSize = 5
+boss:GetConfig().sync = false
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tPULL\t10184\t30\t1\t30", "PARTY", "Autre-Mock")
+equal(boss.engaged, nil, "sync off : PULL ignore")
+Mock.addonMessages = {}
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 12345)
+equal(#Mock.addonMessages, 0, "sync off : rien envoye")
+boss:Disengage("manual")
+boss:GetConfig().sync = true
+
+-- Arrivee dans un groupe : demande d'etat.
+Mock.addonMessages = {}
+Mock.FireEvent("GROUP_ROSTER_UPDATE")
+Mock.Advance(1.5)
+last = Mock.LastAddonMessage()
+equal(last and last.message, "1\tREQ", "demande d'etat a l'arrivee dans un groupe")
+Mock.FireEvent("GROUP_ROSTER_UPDATE")
+Mock.Advance(1.5)
+equal(#Mock.addonMessages, 1, "demande d'etat limitee dans le temps")
+Mock.groupSize = 1
+Mock.units.target = nil
+
+--------------------------------------------------------------------------------
+
 suite("Alertes")
 -- Le boss timer et le swing timer pilotent aussi le combat log : on les eteint
 -- pendant les trois suites d'alerte pour que chacune ne teste qu'elle-meme.
@@ -873,6 +1006,9 @@ equal(Mock.FindPrinted("Onyxia"), nil, "... sans les raids")
 SlashCmdList["MYBOSSSUITE"]("boss annonces off")
 equal(ns:GetModule("bossTimer"):GetConfig().announce, false, "/mbs boss annonces off")
 SlashCmdList["MYBOSSSUITE"]("boss annonces on")
+SlashCmdList["MYBOSSSUITE"]("boss sync off")
+equal(ns:GetModule("bossTimer"):GetConfig().sync, false, "/mbs boss sync off")
+SlashCmdList["MYBOSSSUITE"]("boss sync on")
 SlashCmdList["MYBOSSSUITE"]("boss cadre off")
 equal(ns:GetModule("bossTimer"):GetConfig().phaseFrame, false, "/mbs boss cadre off")
 SlashCmdList["MYBOSSSUITE"]("boss cadre on")

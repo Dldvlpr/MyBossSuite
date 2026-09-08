@@ -396,6 +396,18 @@ function ns.GroupUnitPrefix()
     return "party", math.max(0, members - 1)
 end
 
+--- Canal de messages addon du groupe courant : "INSTANCE_CHAT" (groupe
+-- d'instance / LFG, retail), "RAID", "PARTY", ou nil hors groupe.
+function ns.GetGroupChannel()
+    if _G.IsInGroup and _G.LE_PARTY_CATEGORY_INSTANCE
+        and IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
+        return "INSTANCE_CHAT"
+    end
+    if ns.IsInRaidGroup() then return "RAID" end
+    if ns.GetNumGroupMembers() > 1 then return "PARTY" end
+    return nil
+end
+
 --------------------------------------------------------------------------------
 -- Combat et instance
 --------------------------------------------------------------------------------

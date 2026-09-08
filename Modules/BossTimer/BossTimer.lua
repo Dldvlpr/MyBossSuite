@@ -34,6 +34,7 @@ local M = ns:NewModule("bossTimer", {
     phaseAlert = true,    -- annonce a chaque changement de phase
     phaseFrame = true,    -- cadre boss / phase / chrono
     summary    = true,    -- resume en fin de combat (kill, wipe, duree)
+    sync       = true,    -- synchronisation pull / phases / kill avec le groupe
     alert = Alerts.MakeDefaults({
         text      = "BOSS",
         color     = { 1, 0.6, 0.2 },
@@ -48,6 +49,7 @@ M.title = "Boss Timer"
 local Bars      = ns.Bars
 local Scheduler = ns.Scheduler
 local EventBus  = ns.EventBus
+local Comm      = ns.Comm
 local GetTime   = GetTime
 
 -- Tables remplies par les fichiers de Data/, chargees apres ce fichier.
@@ -84,6 +86,13 @@ local INACTIVITY = { world = 45 }
 local WATCHDOG_INTERVAL = 5
 
 local VALID_KINDS = { raid = true, dungeon = true, world = true }
+
+-- Synchronisation : ecart minimal (s) entre deux heures de pull pour adopter
+-- celle d'un autre joueur ; fenetre pendant laquelle un PULL recu dispense de
+-- repondre a une demande d'etat (sinon 39 reponses a chaque arrivant en raid).
+local SYNC_PULL_TOLERANCE = 1.5
+local SYNC_REPLY_WINDOW   = 2
+local SYNC_REQUEST_THROTTLE = 5
 
 local EMOTE_EVENTS = {
     "CHAT_MSG_RAID_BOSS_EMOTE",
@@ -379,6 +388,7 @@ end
 function M:ScheduleNext(def, delay)
     self:CancelTimerSchedule(def)
     self:ShowBar(def, delay)
+    def.dueAt = GetTime() + delay
 
     local prefix = TimerPrefix(def)
     Scheduler:Schedule(prefix .. "fire", delay, function()
@@ -415,6 +425,17 @@ function M:ScheduleNext(def, delay)
             end
         end
     end
+end
+
+--- Delai jusqu'a la prochaine occurrence d'un timer dont l'origine (pull ou
+-- entree de phase) remonte a `elapsed` secondes : rattrape les cycles deja
+-- passes d'un timer repetitif, nil si l'echeance unique est deja passee.
+local function NextDelay(def, elapsed)
+    local delay = def.time - (elapsed or 0)
+    if delay > 0 then return delay end
+    if not def.repeatInterval or def.once then return nil end
+    repeat delay = delay + def.repeatInterval until delay > 0
+    return delay
 end
 
 --------------------------------------------------------------------------------
@@ -527,7 +548,7 @@ function M:ShowPhaseBar(current)
 
     local remaining
     if nextDef.trigger == "PHASE" then
-        remaining = nextDef.time
+        remaining = self.phaseTime + nextDef.time - GetTime()
     elseif nextDef.trigger == "PULL" then
         remaining = self.pullTime + nextDef.time - GetTime()
     else
@@ -549,7 +570,8 @@ end
 
 --- Entre dans la phase `index`. Coupe les timers qui n'y ont pas leur place,
 -- lance ceux relatifs a l'entree dans la phase, annonce, et arme la suivante.
-function M:SetPhase(index, reason)
+--- `elapsed` : la phase a commence il y a tant de secondes (synchronisation).
+function M:SetPhase(index, reason, elapsed)
     local def = self.def
     if not def then return false end
     index = tonumber(index)
@@ -560,8 +582,9 @@ function M:SetPhase(index, reason)
 
     local previous = self.phase
     local phaseDef = phases[index]
+    elapsed = elapsed or 0
     self.phase     = index
-    self.phaseTime = GetTime()
+    self.phaseTime = GetTime() - elapsed
     if phaseDef then phaseDef.fired = true end
 
     local timers = def.timers or EMPTY
@@ -571,12 +594,17 @@ function M:SetPhase(index, reason)
             if not TimerInPhase(timer, index) then
                 self:CancelTimerDef(timer)
             elseif timer.trigger == "PHASE" and timer.phase == index and timer.time then
-                self:ScheduleNext(timer, timer.time)
+                local delay = NextDelay(timer, elapsed)
+                if delay then self:ScheduleNext(timer, delay) end
             end
         end
     end
 
     self:ShowPhaseBar(index)
+
+    if previous and reason ~= "sync" and reason ~= "test" and self.engaged then
+        self:Broadcast("PHASE", self.engaged, index, math.floor(elapsed))
+    end
 
     local config = self:GetConfig() or EMPTY
     if previous and phaseDef and config.phaseAlert ~= false then
@@ -639,7 +667,9 @@ function M:UnregisterEmoteEvents()
     end
 end
 
-function M:Engage(npcId, guid)
+--- `sync` : { elapsed, phase, phaseElapsed, sender } quand l'engage vient d'un
+-- autre joueur ; l'heure du pull est alors la sienne, pas la notre.
+function M:Engage(npcId, guid, sync)
     if self.testing then return end
     local primary = BossTimerAlias[npcId] or npcId
     local def = BossTimerData[primary]
@@ -656,12 +686,15 @@ function M:Engage(npcId, guid)
 
     local _, _, difficultyId, _, instanceId = ns.GetInstanceInfo()
 
+    local elapsed = sync and tonumber(sync.elapsed) or 0
+    if keepPull and GetTime() - keepPull > elapsed then elapsed = GetTime() - keepPull end
+
     self.engaged       = primary
     self.generic       = nil
     self.def           = def
     self.kind          = VALID_KINDS[def.kind] and def.kind or ns.GetContentKind()
     self.bossGUID      = guid
-    self.pullTime      = keepPull or GetTime()
+    self.pullTime      = GetTime() - elapsed
     self.phase         = nil
     self.phaseTime     = self.pullTime
     self.lastHealthPct = nil
@@ -678,7 +711,10 @@ function M:Engage(npcId, guid)
 
     self:BuildLookups(def, difficultyId)
     self:SetPhase(1, "engage")
-    self:StartPullTimers(def)
+    self:StartPullTimers(def, elapsed)
+    if sync and tonumber(sync.phase) and tonumber(sync.phase) > 1 then
+        self:SetPhase(tonumber(sync.phase), "sync", tonumber(sync.phaseElapsed) or 0)
+    end
 
     self:Repeat("healthPoll", HEALTH_POLL_INTERVAL, function() self:PollHealth() end)
     if #self.emoteTriggers > 0 then self:RegisterEmoteEvents() end
@@ -691,7 +727,12 @@ function M:Engage(npcId, guid)
 
     self:ShowPhaseFrame()
 
-    ns.Debug("engage", primary, def.name, guid, self.kind)
+    if sync then
+        ns.Debug("engage synchronise depuis", sync.sender, primary, def.name, "pull il y a", elapsed)
+    else
+        self:Broadcast("PULL", primary, math.floor(elapsed), self.phase or 1, 0)
+        ns.Debug("engage", primary, def.name, guid, self.kind)
+    end
     EventBus:Fire("BOSS_ENGAGED", primary, guid, self.kind)
 end
 
@@ -722,14 +763,39 @@ function M:EngageGeneric(encounterId, name)
     EventBus:Fire("BOSS_ENGAGED", self.engaged, nil, self.kind)
 end
 
-function M:StartPullTimers(def)
+function M:StartPullTimers(def, elapsed)
     local timers = def.timers or EMPTY
     for i = 1, #timers do
         local timer = timers[i]
         if timer.trigger == "PULL" and timer.time and not timer.skipped and TimerInPhase(timer, 1) then
-            self:ScheduleNext(timer, timer.time)
+            local delay = NextDelay(timer, elapsed)
+            if delay then
+                if delay < timer.time then timer.fired = true end
+                self:ScheduleNext(timer, delay)
+            end
         end
     end
+end
+
+--- Un autre joueur a vu le pull `delta` secondes avant nous : on recule
+-- l'heure du pull et on rapproche d'autant tout ce qui en depend.
+function M:ShiftPull(delta)
+    if not self.def or delta <= 0 then return end
+    self.pullTime = self.pullTime - delta
+    local now = GetTime()
+    local timers = self.def.timers or EMPTY
+    for i = 1, #timers do
+        local timer = timers[i]
+        if timer.trigger == "PULL" and not timer.skipped and timer.dueAt
+            and Scheduler:IsScheduled(TimerPrefix(timer) .. "fire") then
+            local remaining = timer.dueAt - now - delta
+            while remaining <= 0 and timer.repeatInterval and not timer.once do
+                remaining = remaining + timer.repeatInterval
+            end
+            self:ScheduleNext(timer, math.max(remaining, 0.1))
+        end
+    end
+    if self.phase then self:ShowPhaseBar(self.phase) end
 end
 
 function M:Disengage(reason)
@@ -779,8 +845,124 @@ function M:Disengage(reason)
             ReasonLabel(reason), FormatClock(elapsed), details))
     end
 
+    if reason == "kill" and def and not def.generic then
+        self:Broadcast("END", npcId, reason)
+    end
+
     ns.Debug("disengage", npcId, reason)
     EventBus:Fire("BOSS_DISENGAGED", npcId, reason, elapsed)
+end
+
+--------------------------------------------------------------------------------
+-- Synchronisation entre joueurs
+--------------------------------------------------------------------------------
+-- Ce que le combat log ne dit pas : l'heure exacte du pull quand on arrive en
+-- cours de combat, la phase quand on est trop loin pour voir le seuil de vie,
+-- la mort du boss quand on est hors de portee du combat log. Chaque joueur
+-- annonce ce qu'il voit ; on adopte ce qui est plus precis que ce qu'on a.
+--
+-- Messages :
+--   PULL  <npcId> <elapsed> <phase> <phaseElapsed>   engage, ou reponse a REQ
+--   PHASE <npcId> <index> <elapsed>                   changement de phase
+--   END   <npcId> <reason>                            kill
+--   REQ                                               "y a-t-il un combat ?"
+--
+-- Anti-echo : rien de ce qui a ete applique depuis un message n'est rediffuse.
+
+function M:SyncEnabled()
+    local config = self:GetConfig()
+    return not config or config.sync ~= false
+end
+
+function M:Broadcast(msgType, ...)
+    if self.syncing or self.testing or not self:SyncEnabled() then return false end
+    return Comm:Send(msgType, ...)
+end
+
+--- Etat courant, sous la forme du message PULL.
+function M:SendState()
+    if not self.engaged or self.generic or self.testing then return false end
+    local now = GetTime()
+    return self:Broadcast("PULL", self.engaged, math.floor(now - self.pullTime),
+        self.phase or 1, math.floor(now - self.phaseTime))
+end
+
+function M:OnSyncPull(sender, npcId, elapsed, phase, phaseElapsed)
+    if not self:SyncEnabled() or self.testing then return end
+    npcId, elapsed = tonumber(npcId), tonumber(elapsed)
+    if not npcId or not elapsed or elapsed < 0 then return end
+    local primary = BossTimerAlias[npcId]
+    if not primary then return end
+    self.lastPullSeen = GetTime()
+
+    self.syncing = true
+    if not self.engaged or self.generic then
+        self:Engage(primary, nil, {
+            elapsed = elapsed, phase = phase, phaseElapsed = phaseElapsed, sender = sender,
+        })
+    elseif self.engaged == primary then
+        local delta = elapsed - (GetTime() - self.pullTime)
+        if delta > SYNC_PULL_TOLERANCE then self:ShiftPull(delta) end
+        self:OnSyncPhase(sender, npcId, phase, phaseElapsed, true)
+    end
+    self.syncing = false
+end
+
+--- Une phase recue : on la prend si elle differe de la notre, sauf pour
+-- revenir en arriere sur un seuil de vie, qui ne remonte jamais.
+function M:OnSyncPhase(sender, npcId, index, elapsed, nested)
+    if not self:SyncEnabled() or self.testing then return end
+    npcId, index = tonumber(npcId), tonumber(index)
+    if not npcId or not index or not self.engaged then return end
+    if BossTimerAlias[npcId] ~= self.engaged then return end
+    if index == self.phase then return end
+    local phases = self.def.phases or EMPTY
+    local phaseDef = phases[index]
+    if not phaseDef then return end
+    if index < (self.phase or 1) then
+        local current = phases[self.phase]
+        if phaseDef.trigger == "HEALTH" or (current and current.trigger == "HEALTH") then return end
+    end
+
+    if not nested then self.syncing = true end
+    if phaseDef.trigger == "HEALTH" then phaseDef.fired = true end
+    self:SetPhase(index, "sync", tonumber(elapsed) or 0)
+    if not nested then self.syncing = false end
+end
+
+function M:OnSyncEnd(sender, npcId, reason)
+    if not self:SyncEnabled() or not self.engaged then return end
+    npcId = tonumber(npcId)
+    if not npcId or BossTimerAlias[npcId] ~= self.engaged then return end
+    if reason ~= "kill" then return end
+    self.syncing = true
+    self:Disengage("kill")
+    self.syncing = false
+end
+
+--- Quelqu'un demande l'etat : on repond avec un leger decalage aleatoire, et
+-- seulement si personne n'a repondu entre-temps.
+function M:OnSyncRequest()
+    if not self.engaged or self.generic or not self:SyncEnabled() then return end
+    local requestedAt = GetTime()
+    self:Schedule("syncReply", 0.2 + math.random() * (SYNC_REPLY_WINDOW - 0.2), function()
+        if self.lastPullSeen and self.lastPullSeen >= requestedAt then return end
+        self:SendState()
+    end)
+end
+
+--- A l'arrivee dans un groupe (ou au login) : y a-t-il deja un combat ?
+function M:RequestState()
+    if self.engaged or not self:SyncEnabled() then return end
+    local now = GetTime()
+    if self.lastRequest and now - self.lastRequest < SYNC_REQUEST_THROTTLE then return end
+    if not ns.GetGroupChannel() then return end
+    self.lastRequest = now
+    self:Broadcast("REQ")
+end
+
+function M:GROUP_ROSTER_UPDATE()
+    self:Schedule("syncRequest", 1, function() self:RequestState() end)
 end
 
 --------------------------------------------------------------------------------
@@ -885,6 +1067,7 @@ end
 
 function M:PLAYER_ENTERING_WORLD()
     if self.engaged then self:Disengage("zone") end
+    self:Schedule("syncRequest", 2, function() self:RequestState() end)
 end
 
 function M:ZONE_CHANGED_NEW_AREA()
@@ -1378,6 +1561,9 @@ function M:StatusLines()
         config.phaseAlert ~= false and "on" or "off",
         config.phaseFrame ~= false and "on" or "off",
         config.summary ~= false and "on" or "off")
+    lines[#lines + 1] = ("synchronisation : %s   canal : %s   envoyes %d / recus %d"):format(
+        config.sync ~= false and "on" or "off", ns.GetGroupChannel() or "aucun (solo)",
+        Comm.sent, Comm.received)
     lines[#lines + 1] = ("detection : %s%s%s"):format(
         ns.has.encounterEvents and "ENCOUNTER_START + " or "",
         ns.has.bossUnitFrames and "unites boss + " or "",
@@ -1426,7 +1612,16 @@ function M:OnEnable()
     self:RegisterEvent("PLAYER_REGEN_DISABLED")
     self:RegisterEvent("PLAYER_ENTERING_WORLD")
     self:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+    self:RegisterEvent("GROUP_ROSTER_UPDATE")
+    self:RegisterEvent("PARTY_MEMBERS_CHANGED", "GROUP_ROSTER_UPDATE")
+    self:RegisterEvent("RAID_ROSTER_UPDATE", "GROUP_ROSTER_UPDATE")
     self:RegisterMessage("TEST_STOPPED", function() self:StopTestBoss() end)
+
+    Comm:On("PULL", function(...) self:OnSyncPull(...) end)
+    Comm:On("PHASE", function(...) self:OnSyncPhase(...) end)
+    Comm:On("END", function(...) self:OnSyncEnd(...) end)
+    Comm:On("REQ", function() self:OnSyncRequest() end)
+    self:Schedule("syncRequest", 2, function() self:RequestState() end)
 
     local problems = self:ValidateData()
     if problems > 0 then
@@ -1438,6 +1633,10 @@ end
 function M:OnDisable()
     self:Disengage("disable")
     self:StopTestBoss()
+    Comm:Off("PULL")
+    Comm:Off("PHASE")
+    Comm:Off("END")
+    Comm:Off("REQ")
     self:UnregisterAllEvents()
     self:UnregisterAllMessages()
     self:CancelAllTimers()

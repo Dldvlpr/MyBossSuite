@@ -15,6 +15,7 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 1 | Format de data boss timer | fait |
 | 2 | Runtime engine boss timer | fait |
 | 2b | Rencontres : world boss, donjon, raid ; phases, annonces, wipe/kill | fait |
+| 2c | Synchronisation entre joueurs (pull, phases, kill) | fait |
 | 3a | `tools/wcl-ingest` (WarcraftLogs) | outil écrit, **data à générer** |
 | 3b | `tools/wa-extract` (WeakAuras perso) | outil écrit |
 | 3c | Extraction depuis DBM/BigWigs | non fait — décision de licence à trancher |
@@ -31,7 +32,8 @@ six modules à moitié faits.
 Le Boss Timer est un vrai moteur de rencontre, du niveau de ce qu'on attend
 d'un DBM ou d'un BigWigs : raid, donjon et world boss, phases visibles avec
 chrono, annonces plein écran et compte à rebours, distinction kill / wipe /
-reset, et un cadre boss / phase / vie. Ce qui lui manque encore par rapport à
+reset, un cadre boss / phase / vie, et une synchronisation entre joueurs du
+groupe (heure du pull, phases, kill). Ce qui lui manque encore par rapport à
 eux tient à la **data**, pas au moteur : voir « Limites assumées ».
 
 ## Installation
@@ -62,7 +64,7 @@ chaque client charge celui qui correspond à son suffixe.
 | `/mbs boss` | rencontre en cours (nature, phase, chrono, vie), data chargée, réglages |
 | `/mbs boss list [raid\|donjon\|world]` | rencontres connues sur ce client, par nature |
 | `/mbs boss phase <n>` | force la phase (en combat ou en test) si la détection a manqué |
-| `/mbs boss annonces\|compte\|phases\|cadre\|resume\|son on\|off` | annonces des timers, compte à rebours, annonce de phase, cadre boss/phase, résumé de fin de combat, son |
+| `/mbs boss annonces\|compte\|phases\|cadre\|resume\|son\|sync on\|off` | annonces des timers, compte à rebours, annonce de phase, cadre boss/phase, résumé de fin de combat, son, synchronisation de groupe |
 | `/mbs alert boss ...` | texte, couleur, taille, son de l'annonce boss (voir ci-dessous) |
 
 ### Alertes (kick, move et annonce boss)
@@ -99,7 +101,7 @@ pour les faire apparaître hors combat — le cadre boss/phase aussi.
 L'ordre de load du `.toc` est le seul mécanisme de dépendance qui existe :
 
 ```
-Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Config → ModuleLoader → Modules → Data
+Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alerts → Config → ModuleLoader → Modules → Data
 ```
 
 * **`Core/Compat.lua`** — toute API divergente passe par ici, et **aucune ligne
@@ -114,6 +116,11 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
 * **`Core/EventBus.lua`** — une frame unique pour tous les events Blizzard (une
   seule inscription à `COMBAT_LOG_EVENT_UNFILTERED` pour tout l'addon) plus un
   bus de messages internes entre modules.
+* **`Core/Comm.lua`** — messages addon entre joueurs du groupe. Préfixe `MBS`,
+  canal choisi seul (`INSTANCE_CHAT`, `RAID`, `PARTY`), messages typés en
+  champs séparés par des tabulations, version de protocole en tête : deux
+  joueurs à des versions différentes s'ignorent au lieu de se corrompre. Les
+  échos de ses propres messages sont filtrés ici, une fois pour tous.
 * **`Core/DB.lua`** — profils par personnage et chaîne de migrations dès la v1.
   Initialisée sur `ADDON_LOADED` avant que quoi que ce soit lise `db.anchors`.
 * **`Core/Anchors.lua`** — mixin de positionnement partagé. `relativeTo` et
@@ -202,6 +209,15 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   timer déclare ses phases. Changer de phase coupe ce qui n'a plus lieu d'être
   et lance ce qui est relatif à l'entrée dans la phase. Rien n'est câblé en dur
   par boss dans le module.
+* **Le groupe se synchronise sur ce que chacun voit, jamais sur un maître.**
+  Qui engage annonce l'heure du pull ; qui détecte une phase l'annonce ; qui
+  voit le boss mourir l'annonce. Chaque joueur adopte ce qui est *plus précis*
+  que ce qu'il a : un pull plus ancien que le sien (jamais plus récent), une
+  phase qu'il n'a pas encore vue (jamais un retour en arrière sur un seuil de
+  vie). Ce qui a été appliqué depuis un message n'est jamais rediffusé : pas
+  d'écho, pas de boucle. Un joueur qui arrive en cours de combat demande l'état
+  (`REQ`), un seul pair répond. Sans groupe, rien n'est envoyé et rien ne
+  manque : la synchronisation est un bonus, pas une dépendance.
 * **Une rencontre sans data affiche quand même le chrono.** Sur Cata+/retail,
   `ENCOUNTER_START` ouvre le cadre boss/phase même sans fichier de data ; si un
   boss connu se manifeste ensuite, la rencontre monte en gamme sans perdre
@@ -214,10 +230,14 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   pendant l'engage — la détection est donc structurellement moins fiable qu'en
   Cata+/retail, pour les phases à seuil de vie comme pour les timers. C'est
   documenté plutôt que maquillé.
-* **World boss engagé avant ton arrivée** : les timers `PULL` comptent depuis
-  *ta* détection, pas depuis le vrai pull. DBM corrige ça par une
-  synchronisation entre joueurs ; il n'y en a pas ici (pas de comm addon), les
-  timers resynchronisés sur un cast observé se recalent seuls.
+* **Synchronisation limitée au groupe.** Un world boss engagé par d'autres
+  groupes ne partage rien avec eux : hors de ton raid, les timers `PULL`
+  comptent depuis *ta* détection, et les timers resynchronisés sur un cast
+  observé se recalent seuls. Dans ton groupe, l'heure du pull est celle du
+  premier qui l'a vue.
+* **Homonymes cross-realm** : le filtre d'écho compare le nom court de
+  l'expéditeur au tien. Un homonyme d'un autre royaume dans ton groupe serait
+  ignoré comme si c'était toi.
 * **Emotes localisés** : un déclencheur `EMOTE` cherche un fragment de texte
   dans la langue du client. La data livrée ne garantit rien hors du client où
   elle a été écrite.
@@ -294,8 +314,10 @@ retail, avec et sans `C_Timer`. Le moteur de rencontre y est joué de bout en
 bout sur un raid (Onyxia et ses trois phases), un donjon (difficulté, joueur
 mort pendant que le groupe se bat, wipe) et un world boss (engage par un autre
 joueur, conseil à deux boss, emote, aura sur toi, compte à rebours, reset par
-inactivité). Ça ne remplace pas un test en jeu, mais ça attrape les régressions
-de logique sans lancer WoW.
+inactivité), et la synchronisation est jouée avec un pair simulé (pull adopté,
+phase reçue, kill reçu, arrivée en cours de combat, demande d'état, échos et
+versions étrangères ignorés). Ça ne remplace pas un test en jeu, mais ça
+attrape les régressions de logique sans lancer WoW.
 
 `tests/test_wcl_alerts.py` teste séparément le **classement** de l'ingestion, sur
 des logs synthétiques et sans réseau : une zone au sol doit être retenue, un DoT,

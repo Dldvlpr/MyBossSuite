@@ -469,12 +469,28 @@ mod : la rencontre a une nature, un début, une fin qualifiée et des phases.
 - [x] rencontre sans data sur Cata+/retail : le cadre et le chrono s'affichent
       quand même ; montée en gamme vers la data si un boss connu se manifeste.
 
+### Synchronisation entre joueurs (`Core/Comm.lua`)
+
+- [x] couche de messages addon : préfixe `MBS`, canal automatique
+      (`INSTANCE_CHAT` / `RAID` / `PARTY`), version de protocole, filtre d'écho.
+- [x] `PULL` à l'engage (heure du pull, phase) ; un pair qui a vu le pull plus
+      tôt fait reculer le nôtre et rapproche les timers `PULL` d'autant
+      (`ShiftPull`), jamais l'inverse.
+- [x] `PHASE` à chaque changement détecté localement ; appliqué si différent,
+      refusé pour revenir en arrière sur un seuil de vie.
+- [x] `END kill` : la mort du boss vue par un pair termine la rencontre chez
+      ceux qui sont hors de portée du combat log. Le wipe n'est pas synchronisé :
+      chacun le voit par le combat de son groupe.
+- [x] `REQ` à l'arrivée dans un groupe, au login, au changement de zone : un
+      pair engagé répond `PULL` avec l'état courant, après un délai aléatoire,
+      et se tait si quelqu'un a déjà répondu.
+- [x] engage par synchronisation : timers repetitifs recalés sur le bon cycle,
+      phase et heure d'entrée de phase du pair.
+- [x] `/mbs boss sync on|off`, compteurs envoyés / reçus dans `/mbs boss`.
+- [ ] le canal est réutilisable tel quel par le CD Tracker (Phase 5).
+
 ### Non fait, et pourquoi
 
-- [ ] **Synchronisation entre joueurs** (heure du pull, phases) : demande une
-      comm addon et un protocole. Sans elle, un world boss engagé avant ton
-      arrivée compte ses timers `PULL` depuis ta détection. À faire avec la
-      Phase 5 (même canal de comm).
 - [ ] **Voix pour le compte à rebours** : fichiers son à produire ou à
       licencier. Le compte à rebours est texte.
 - [ ] **Data** : Onyxia, Kazzak et Herod sont des références de format ;

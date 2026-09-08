@@ -227,8 +227,19 @@ function _G.UnitAura(unit, index)
     return aura.name or (spell and spell.name) or "?", spell and spell.icon, 1, nil,
         10, Mock.now + 10, "boss1", nil, nil, aura.spellId
 end
-function _G.SendAddonMessage() end
+-- Les messages addon envoyes sont conserves : c'est ce qui permet de verifier
+-- ce qu'un joueur annonce a son groupe. Un pair se simule en rejouant
+-- CHAT_MSG_ADDON avec un autre nom d'expediteur.
+Mock.addonMessages = {}
+
+function _G.SendAddonMessage(prefix, message, channel)
+    Mock.addonMessages[#Mock.addonMessages + 1] = { prefix = prefix, message = message, channel = channel }
+end
 function _G.RegisterAddonMessagePrefix() end
+
+function Mock.LastAddonMessage()
+    return Mock.addonMessages[#Mock.addonMessages]
+end
 
 --------------------------------------------------------------------------------
 -- Combat log
@@ -411,8 +422,11 @@ function Mock.InstallRetail()
     }
 
     _G.C_ChatInfo = {
-        SendAddonMessage = function() end,
-        RegisterAddonMessagePrefix = function() end,
+        SendAddonMessage = function(prefix, message, channel)
+            _G.SendAddonMessage(prefix, message, channel)
+            return 0
+        end,
+        RegisterAddonMessagePrefix = function() return 0 end,
     }
 
     _G.C_AddOns = {

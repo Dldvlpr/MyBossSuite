@@ -239,7 +239,7 @@ local HELP = {
     "  |cffffff00/mbs test|r [anchorKey] — barres factices sur toutes les ancres",
     "  |cffffff00/mbs test stop|r — arrete le mode test",
     "  |cffffff00/mbs test boss <npcId>|r — rejoue la timeline d'un boss hors combat",
-    "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume on/off]",
+    "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume|sync on/off]",
     "  |cffffff00/mbs list|r — etat des modules",
     "  |cffffff00/mbs enable|disable|toggle <module>|r",
     "  |cffffff00/mbs alert|r [kick|move] [texte|couleur|taille|duree|son|visuel|flash|test|reset]",
@@ -616,6 +616,7 @@ local BOSS_FLAGS = {
     cadre = "phaseFrame", frame = "phaseFrame",
     resume = "summary", summary = "summary",
     son = "sound", sound = "sound",
+    sync = "sync", synchro = "sync",
 }
 
 local function HandleBoss(arg1, arg2)
@@ -674,7 +675,7 @@ local function HandleBoss(arg1, arg2)
     local field = BOSS_FLAGS[option]
     if not field then
         ns.Print("usage : /mbs boss [status | list [raid|donjon|world] | phase <n> | "
-            .. "annonces|compte|phases|cadre|resume|son on|off]")
+            .. "annonces|compte|phases|cadre|resume|son|sync on|off]")
         return
     end
 
