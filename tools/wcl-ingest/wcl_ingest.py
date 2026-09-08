@@ -179,7 +179,34 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
             by_ability[ability].append((float(event["timestamp"]) - pull) / 1000.0)
 
         if not by_ability:
+            # Sans le detail, ce message est un cul-de-sac : il ne dit pas si le
+            # combat est vide, si le npcId est faux, ou si le fightID ne
+            # correspond pas au boss vise. Les NPC qui ont REELLEMENT casté sont
+            # la reponse, et elle est deja dans les evenements qu'on vient de
+            # lire — ne pas l'afficher serait la jeter.
+            seen = defaultdict(int)
+            for event in events:
+                if event.get("type") not in ("cast", "begincast"):
+                    continue
+                source = actors.get(event.get("sourceID"))
+                if source is None or source.get("type") == "Player":
+                    continue
+                game_id = source.get("gameID")
+                if game_id is not None:
+                    seen[(game_id, source.get("name") or "?")] += 1
             print(f"  ! {code}:{fight_id} : aucun cast ennemi retenu", file=sys.stderr)
+            if seen:
+                detail = ", ".join(
+                    "%s (npcId %s, %d casts)" % (name, game_id, count)
+                    for (game_id, name), count in sorted(seen.items(), key=lambda kv: -kv[1])[:8])
+                print("      NPC ayant caste dans ce combat : %s" % detail, file=sys.stderr)
+                if npc_id is not None:
+                    print("      --npc-id %s ne correspond a aucun d'eux." % npc_id,
+                          file=sys.stderr)
+            else:
+                print("      aucun NPC n'a caste : ce combat est probablement du "
+                      "trash, ou le fightID ne designe pas le boss vise.",
+                      file=sys.stderr)
             continue
 
         used += 1
