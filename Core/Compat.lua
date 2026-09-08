@@ -141,20 +141,38 @@ end
 local UnitCastingInfo = _G.UnitCastingInfo
 local UnitChannelInfo = _G.UnitChannelInfo
 
+-- Le nombre de valeurs rendues varie selon le client. Classic Era n'a pas de
+-- `notInterruptible` : le spellId y occupe la case ou les autres clients mettent
+-- le booleen, et une lecture positionnelle aveugle perdrait le spellId (lu nil)
+-- tout en prenant un nombre pour le booleen. On lit donc par type.
+--   cast    retail : name, text, texture, start, end, isTradeSkill, castID, notInterruptible, spellId
+--   cast    era    : name, text, texture, start, end, isTradeSkill, castID, spellId
+--   channel retail : name, text, texture, start, end, isTradeSkill, notInterruptible, spellId
+--   channel era    : name, text, texture, start, end, isTradeSkill, spellId
+local function ReadCast(isChannel, name, _, texture, startTime, endTime, _, a7, a8, a9)
+    if not name then return nil end
+    local notInterruptible, spellId
+    if isChannel then
+        if type(a7) == "number" then spellId = a7 else notInterruptible, spellId = a7, a8 end
+    else
+        if type(a8) == "number" then spellId = a8 else notInterruptible, spellId = a8, a9 end
+    end
+    return name, texture, startTime, endTime, notInterruptible == true, spellId, isChannel
+end
+
 function ns.GetCastInfo(unit)
     if UnitCastingInfo then
-        local name, _, texture, startTime, endTime, _, _, notInterruptible, spellId =
-            UnitCastingInfo(unit)
+        local name, texture, startTime, endTime, notInterruptible, spellId =
+            ReadCast(false, UnitCastingInfo(unit))
         if name then
-            return name, texture, startTime, endTime, notInterruptible == true, spellId, false
+            return name, texture, startTime, endTime, notInterruptible, spellId, false
         end
     end
     if UnitChannelInfo then
-        -- Un channel n'a pas de castID : `notInterruptible` remonte d'un cran.
-        local name, _, texture, startTime, endTime, _, notInterruptible, spellId =
-            UnitChannelInfo(unit)
+        local name, texture, startTime, endTime, notInterruptible, spellId =
+            ReadCast(true, UnitChannelInfo(unit))
         if name then
-            return name, texture, startTime, endTime, notInterruptible == true, spellId, true
+            return name, texture, startTime, endTime, notInterruptible, spellId, true
         end
     end
     return nil

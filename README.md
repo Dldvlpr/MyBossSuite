@@ -42,6 +42,7 @@ chaque client charge celui qui correspond à son suffixe.
 | `/mbs test` | barres factices en boucle sur chaque ancre |
 | `/mbs test <anchorKey>` | idem, sur une seule ancre |
 | `/mbs test boss <npcId>` | rejoue la timeline d'un boss hors combat |
+| `/mbs anchor [<spellId>\|remove <spellId>]` | ancre dédiée pour les barres d'un sort (déplaçable via `/mbs unlock`) |
 | `/mbs test stop` | arrête le mode test |
 | `/mbs list` | état des modules |
 | `/mbs enable\|disable\|toggle <module>` | activation à chaud |
@@ -96,7 +97,11 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   sans toucher aux autres.
 * **`Core/EventBus.lua`** — une frame unique pour tous les events Blizzard (une
   seule inscription à `COMBAT_LOG_EVENT_UNFILTERED` pour tout l'addon) plus un
-  bus de messages internes entre modules.
+  bus de messages internes entre modules. Chaque handler tourne sous `pcall`
+  (une erreur dans un module ne prive pas les autres de l'event, et elle est
+  remontée à l'error handler du client, au plus une fois par minute), et les
+  listes de handlers sont remplacées plutôt que modifiées en place : un module
+  qui se désinscrit pendant un dispatch ne fait jamais appeler `nil`.
 * **`Core/DB.lua`** — profils par personnage et chaîne de migrations dès la v1.
   Initialisée sur `ADDON_LOADED` avant que quoi que ce soit lise `db.anchors`.
 * **`Core/Anchors.lua`** — mixin de positionnement partagé. `relativeTo` et
@@ -128,6 +133,15 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   de 40 % de sa durée d'attaque et sans jamais descendre sous 20 % du restant.
   (La roadmap branchait le raccourcissement sur le `sourceGUID` ; c'est le
   `destGUID` d'un `SWING_MISSED`/`PARRY` qui identifie l'unité concernée.)
+* **Sortie de combat du joueur ≠ fin du combat.** `PLAYER_REGEN_ENABLED` tombe
+  quand tu meurs, à un feign death, ou quand tu sors de combat alors que le raid
+  continue : s'en servir pour couper les timers les fait disparaître au moment
+  où ils comptent. Le boss timer ne se désengage que sur `ENCOUNTER_END`, la
+  mort du boss, ou une fin de combat établie sur le groupe : tout le monde mort
+  (wipe), ou plus personne en combat **et** le boss muet depuis 15 s (reset).
+  En solo, sortir de combat reste la fin. Un `ENCOUNTER_START` sans GUID
+  cherche le boss sur `boss1..5`, puis le combat log l'identifie
+  (`BOSS_IDENTIFIED`), pour que le swing timer se verrouille dessus quand même.
 * **Un cast observé prime sur une estimation.** Un `spellId` posé sur un timer
   `PULL` sert de resynchronisation : quand le boss lance réellement le sort, la
   prochaine occurrence est recalée dessus.
@@ -169,8 +183,10 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   documenté plutôt que maquillé.
 * **La data d'Onyxia livrée est provisoire** : elle sert de référence de format.
   Elle doit être régénérée par `tools/wcl-ingest` avant tout usage sérieux.
-* **Swing timer** : main-hand uniquement. Le combat log ne distingue pas les
-  coups de main gauche sur `SWING_DAMAGE`.
+* **Swing timer** : main-hand uniquement. Les coups de main gauche
+  (`isOffHand`, 21e argument de `SWING_DAMAGE`, 13e de `SWING_MISSED`) sont
+  reconnus et ignorés : ils ne relancent pas la barre, mais elle ne les affiche
+  pas non plus.
 * **Précision du CD Tracker** (quand il existera) : Blizzard bloque la lecture
   du cooldown exact d'un autre joueur sans son broadcast. Sans addon compatible
   en face, ce sera de l'estimé — et un CD estimé devra s'afficher comme tel.
@@ -179,7 +195,10 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   qui ne dit pas si le sort est protégé — l'alerte assume alors *interruptible*
   et le signale par un `(?)`. `/mbs kick strict on` inverse le compromis : rien
   que du prouvé. Le repli ne voit pas les sorts sans temps d'incantation, qui ne
-  sont de toute façon pas kickables.
+  sont de toute façon pas kickables. Et comme `SPELL_CAST_FAILED` n'est jamais
+  loggé pour un PNJ, un cast annulé (stun, mort de la cible) n'y laisse aucune
+  trace : là où le client voit la fin du cast (`UNIT_SPELLCAST_STOP`), l'entrée
+  du repli est purgée aussitôt ; là où il ne la voit pas, elle expire en 6 s.
 * **Aucune data d'alerte n'est livrée pour l'instant** : `wcl_alerts.py` est
   écrit et testé, mais la génération demande des identifiants WarcraftLogs
   (`WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`). Tant qu'elle n'a pas tourné, les deux
@@ -195,7 +214,9 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   qui pose un debuff en même temps qu'elle tape, n'est pas détectée au premier
   contact — elle l'est ensuite via `/mbs move add <spellId>`. C'est le prix de
   l'absence de base de données curée ; l'inverse (alerter à tort sur chaque coup
-  de boss) serait pire.
+  de boss) serait pire. Un coup entièrement absorbé par un bouclier arrive en
+  `SPELL_ABSORBED`, qui ne dit pas s'il était périodique : seules les zones de
+  ta liste ou de la data alertent sous bouclier, jamais l'heuristique.
 
 ## Outils
 
@@ -234,7 +255,13 @@ tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion 
 La suite charge le vrai code dans un mock d'API WoW et pilote le temps à la
 main : elle vérifie le socle et les quatre modules sur client classic **et**
 retail, avec et sans `C_Timer`. Ça ne remplace pas un test en jeu, mais ça
-attrape les régressions de logique sans lancer WoW.
+attrape les régressions de logique sans lancer WoW. Les cas qui ont déjà
+cassé en sont : coup de main gauche sur le swing timer, mort du joueur au
+milieu d'un pull, cast de PNJ annulé sans trace dans le combat log, forme
+Classic Era de `UnitCastingInfo`, handler d'event en erreur.
+
+Les numéros `## Interface` des six `.toc` sont dans `tools/gen-toc.sh` ; ils
+sont à bumper à chaque patch client, sinon l'addon apparaît comme obsolète.
 
 `tests/test_wcl_alerts.py` teste séparément le **classement** de l'ingestion, sur
 des logs synthétiques et sans réseau : une zone au sol doit être retenue, un DoT,

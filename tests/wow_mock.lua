@@ -96,9 +96,14 @@ function _G.UnitIsDead(unit)
     return u ~= nil and u.dead == true
 end
 function _G.UnitIsDeadOrGhost(unit) return UnitIsDead(unit) end
+function _G.UnitAffectingCombat(unit)
+    local u = Mock.units[unit]
+    return u ~= nil and u.combat == true
+end
 function _G.GetRealmName() return "Mock" end
-function _G.GetNumGroupMembers() return 1 end
-function _G.IsInRaid() return false end
+-- 0 = solo, comme le vrai client. Mock.groupSize / Mock.inRaid pilotent le groupe.
+function _G.GetNumGroupMembers() return Mock.groupSize or 0 end
+function _G.IsInRaid() return Mock.inRaid == true end
 
 --------------------------------------------------------------------------------
 -- Spells
@@ -178,9 +183,16 @@ function Mock.SetCast(unit, spellId, notInterruptible, channel)
     }
 end
 
+-- Mock.legacyCastInfo = true reproduit Classic Era : UnitCastingInfo et
+-- UnitChannelInfo n'y rendent pas `notInterruptible`, et le spellId occupe la
+-- case du booleen. Compat doit s'en sortir sans perdre le spellId.
 function _G.UnitCastingInfo(unit)
     local cast = Mock.casts[unit]
     if not cast or cast.channel then return nil end
+    if Mock.legacyCastInfo then
+        return cast.name, nil, cast.icon, Mock.now * 1000, (Mock.now + 2) * 1000,
+            false, "cast1", cast.spellId
+    end
     return cast.name, nil, cast.icon, Mock.now * 1000, (Mock.now + 2) * 1000,
         false, "cast1", cast.notInterruptible, cast.spellId
 end
@@ -188,6 +200,10 @@ end
 function _G.UnitChannelInfo(unit)
     local cast = Mock.casts[unit]
     if not cast or not cast.channel then return nil end
+    if Mock.legacyCastInfo then
+        return cast.name, nil, cast.icon, Mock.now * 1000, (Mock.now + 2) * 1000,
+            false, cast.spellId
+    end
     return cast.name, nil, cast.icon, Mock.now * 1000, (Mock.now + 2) * 1000,
         false, cast.notInterruptible, cast.spellId
 end
@@ -214,19 +230,23 @@ function _G.RegisterAddonMessagePrefix() end
 --------------------------------------------------------------------------------
 
 Mock.combatLogPayload = {}
+Mock.combatLogCount = 0
 
 function _G.CombatLogGetCurrentEventInfo()
-    return unpack(Mock.combatLogPayload, 1, 20)
+    return unpack(Mock.combatLogPayload, 1, math.max(24, Mock.combatLogCount))
 end
 
 --- Emet un evenement de combat log. Les positions suivent la signature reelle :
 -- timestamp, subevent, hideCaster, srcGUID, srcName, srcFlags, srcRaidFlags,
--- dstGUID, dstName, dstFlags, dstRaidFlags, puis les parametres du suffixe.
-function Mock.FireCombatLog(subevent, srcGUID, dstGUID, p12, p13, p14, p15)
-    Mock.combatLogPayload = {
-        Mock.now, subevent, false, srcGUID, "src", 0, 0, dstGUID, "dst", 0, 0,
-        p12, p13, p14, p15,
-    }
+-- dstGUID, dstName, dstFlags, dstRaidFlags, puis les parametres du suffixe a
+-- partir de la 12e position, autant qu'on en passe (les nil sont conserves :
+-- isOffHand est le 21e argument de SWING_DAMAGE).
+function Mock.FireCombatLog(subevent, srcGUID, dstGUID, ...)
+    local payload = { Mock.now, subevent, false, srcGUID, "src", 0, 0, dstGUID, "dst", 0, 0 }
+    local n = select("#", ...)
+    for i = 1, n do payload[11 + i] = (select(i, ...)) end
+    Mock.combatLogPayload = payload
+    Mock.combatLogCount = 11 + n
     Mock.FireEvent("COMBAT_LOG_EVENT_UNFILTERED")
 end
 

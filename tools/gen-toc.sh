@@ -15,15 +15,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE="$ROOT/tools/toc.template"
 VERSION="0.1.0"
 
-# Bumper a chaque patch majeur du client concerne.
+# Bumper a chaque patch majeur du client concerne. Un numero depasse rend
+# l'addon "obsolete", donc desactive tant que l'option "charger les addons
+# obsoletes" n'est pas cochee. Plusieurs numeros separes par des virgules sont
+# acceptes quand un meme flavor a plusieurs builds en vie (Wrath : 30405 et le
+# build 38002 que DBM et BigWigs declarent aussi).
+# Reference : les .toc de DBM-Core, releves le 2026-09-08.
 # suffixe:flavor:interface
 FLAVORS=(
-    "Vanilla:vanilla:11507"
-    "TBC:tbc:20504"
-    "Wrath:wrath:30403"
+    "Vanilla:vanilla:11509"
+    "TBC:tbc:20506"
+    "Wrath:wrath:30405, 38002"
     "Cata:cata:40402"
-    "Mists:mists:50500"
-    "Mainline:retail:110200"
+    "Mists:mists:50504"
+    "Mainline:retail:120100"
 )
 
 CHECK=0

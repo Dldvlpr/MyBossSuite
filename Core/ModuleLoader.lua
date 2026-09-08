@@ -175,6 +175,33 @@ local function InitializeModule(module)
     end
 end
 
+--- Applique un etat runtime sans toucher au profil : c'est le coeur commun de
+-- SetModuleEnabled, de RefreshModules et du redemarrage sur changement de
+-- profil (qui ne doit surtout pas ecrire `enabled = false` dans le nouveau).
+local function ApplyState(module, enabled)
+    if enabled == module.isEnabled then return end
+
+    InitializeModule(module)
+    module.isEnabled = enabled
+
+    local callback = enabled and module.OnEnable or module.OnDisable
+    if callback then
+        local ok, err = pcall(callback, module)
+        if not ok then
+            ns.Print(("erreur %s [%s]: %s")
+                :format(enabled and "OnEnable" or "OnDisable", module.name, err))
+        end
+    end
+
+    if not enabled then
+        -- Filet de securite : meme si OnDisable oublie quelque chose.
+        module:UnregisterAllEvents()
+        module:CancelAllTimers()
+    end
+
+    ns.EventBus:Fire("MODULE_STATE_CHANGED", module.name, enabled)
+end
+
 --- Toute activation / desactivation passe par ici : OnDisable doit etre COMPLET
 -- (events, timers, frames). Un module desactive qui laisse une frame visible ou
 -- un ticker vivant, c'est le bug qu'on ne trouve jamais.
@@ -190,27 +217,7 @@ function ns:SetModuleEnabled(name, enabled)
     local config = module:GetConfig()
     if config then config.enabled = enabled end
 
-    if enabled == module.isEnabled then return true end
-
-    InitializeModule(module)
-    module.isEnabled = enabled
-
-    local callback = enabled and module.OnEnable or module.OnDisable
-    if callback then
-        local ok, err = pcall(callback, module)
-        if not ok then
-            ns.Print(("erreur %s [%s]: %s")
-                :format(enabled and "OnEnable" or "OnDisable", name, err))
-        end
-    end
-
-    if not enabled then
-        -- Filet de securite : meme si OnDisable oublie quelque chose.
-        module:UnregisterAllEvents()
-        module:CancelAllTimers()
-    end
-
-    ns.EventBus:Fire("MODULE_STATE_CHANGED", name, enabled)
+    ApplyState(module, enabled)
     return true
 end
 
@@ -237,10 +244,19 @@ function ns:RefreshModules()
         InitializeModule(module)
         local config = module:GetConfig()
         local wanted = config and config.enabled or false
-        if wanted ~= module.isEnabled then
-            ns:SetModuleEnabled(name, wanted)
-        end
+        ApplyState(module, wanted)
     end
+end
+
+--- Changement de profil : un module qui reste actif d'un profil a l'autre ne
+-- relit pas sa config tout seul (interrupt force, focus, seuils...). On l'eteint
+-- puis RefreshModules le rallume selon le nouveau profil, sans rien y ecrire.
+function ns:RestartModules()
+    for i = 1, #ns.moduleOrder do
+        local module = ns.modules[ns.moduleOrder[i]]
+        if module.isEnabled then ApplyState(module, false) end
+    end
+    ns:RefreshModules()
 end
 
 --------------------------------------------------------------------------------
@@ -272,5 +288,5 @@ bootstrap:SetScript("OnEvent", function(self, event, arg1)
 end)
 
 ns.EventBus:On("PROFILE_CHANGED", function()
-    ns:RefreshModules()
+    ns:RestartModules()
 end)
