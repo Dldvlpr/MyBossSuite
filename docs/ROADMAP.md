@@ -507,6 +507,9 @@ Réordonné par rapport à la version initiale, pour deux raisons : le shim BigW
 - [ ] Client API : warcraftlogs.com/api/clients/ (OAuth, gratuit)
 - [ ] API v2 = GraphQL. Scriptable, donc pas limité à de la vérification ponctuelle.
 - [ ] `tools/wcl-ingest/` : pull de N logs par boss → deltas depuis le pull → **médiane** par spellId → génération du fichier `Data/<Flavor>/<Raid>/<Boss>.lua`.
+- [x] **Fusion à la régénération** (fait) : seuls `repeatInterval`, `variable` et le `time` des timers `PULL` sont réécrits. Le tableau `phases`, les timers `PHASE`/`CAST`/`AURA`, les libellés, `announce`, `flash` — tout ce qui s'écrit à la main — survit. Sans ça, éditer un fichier est jetable et un boss à phases n'est jamais régénérable : l'ingestion en masse s'arrête au premier boss non trivial. `--replace` écrase, un fichier illisible arrête le passage avant tout appel API.
+- [ ] **Proposition de phase** : le couple (écart-type du premier cast élevé, écart-type des intervalles serré) est la signature d'une capacité gated par une phase, pas d'une mécanique aléatoire. Aujourd'hui elle ressort en `variable = true` — cf. le commentaire de `VARIABLE_STDEV`, qui nomme déjà le cas. À convertir en `-- TODO phase ?` + `provisional`, le générateur signalant sans deviner.
+- [ ] **Origine des timers `PHASE`** : l'ingestion ne mesure qu'un delta depuis le pull, donc le `time` d'un timer `PHASE` reste écrit à la main et le timer reste `provisional`. Pour le mesurer il faut situer les bornes de phase dans le log : `phaseTransitions` (couverture à vérifier hors retail) ou la courbe de vie du boss — ni l'un ni l'autre n'est demandé par `FIGHT_QUERY`. C'est aussi ce qui permettrait de générer les entrées de `phases`, que `render_lua` n'émet pas (il ne sort que du `trigger = "PULL"`).
 
 ```graphql
 query($code: String!, $fight: Int!) {

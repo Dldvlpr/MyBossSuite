@@ -3,7 +3,8 @@
 #   1. syntaxe de tous les fichiers Lua
 #   2. suite headless sur 4 configurations de client
 #   3. classement de l'ingestion WCL (heuristique des zones a fuir)
-#   4. .toc a jour vis-a-vis de tools/gen-toc.sh
+#   4. fusion a la regeneration (la data ecrite a la main doit survivre)
+#   5. .toc a jour vis-a-vis de tools/gen-toc.sh
 #
 # Prerequis : lua5.1 (ou lua) et python3 dans le PATH.
 
@@ -51,6 +52,15 @@ done
 echo
 echo "== ingestion WCL (logique de classement, sans reseau)"
 if output=$(python3 tests/test_wcl_alerts.py 2>&1); then
+    echo "  ok   $(printf '%s' "$output" | tail -n 1)"
+else
+    printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
+    status=1
+fi
+
+echo
+echo "== ingestion WCL (fusion a la regeneration, sans reseau)"
+if output=$(python3 tests/test_wcl_merge.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
