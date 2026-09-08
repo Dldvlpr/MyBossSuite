@@ -30,6 +30,8 @@ Modules/BossTimer/BossTimer.lua
 Modules/InterruptAlert/InterruptAlert.lua
 Modules/MoveAlert/MoveAlert.lua
 Modules/CDTracker/CDTracker.lua
+# La rotation apres le CD Tracker : elle n'a de source que lui.
+Modules/InterruptRotation/InterruptRotation.lua
 
 # Data du flavor cata uniquement : aucune data morte chargee sur ce client.
 # (aucune data pour ce flavor)

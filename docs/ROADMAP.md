@@ -660,12 +660,47 @@ Limite honnête à documenter dans le README : précision réelle uniquement si 
 
 ## Phase 6 — Module Interrupt Rotation
 
-- [ ] `Modules/InterruptRotation/InterruptRotation.lua`
+- [x] `Modules/InterruptRotation/InterruptRotation.lua` (fait)
 
-1. Réutilise le flux LibOpenRaid de la Phase 5, sous-ensemble `interrupt = true`.
-2. Round-robin : liste des joueurs dont le kick est réellement disponible (CD reçu = 0), rotation dans l'ordre du groupe.
-3. **Track `SPELL_CAST_SUCCESS` sur les spellId d'interrupt, pas `SPELL_INTERRUPT`.** Un kick lancé dans le vide (rien à interrompre à ce moment) part quand même en cooldown mais ne génère aucun `SPELL_INTERRUPT`. Si tu écoutes le mauvais événement, ta rotation désignera un joueur qui n'a plus son kick — et l'interrupt passe à travers. C'est le bug qui tue la crédibilité du module.
-4. Override manuel de priorité : pas en v1. À ajouter si le round-robin se révèle insuffisant à l'usage.
+1. ~~Réutilise le flux LibOpenRaid de la Phase 5, sous-ensemble `interrupt = true`.~~
+   **Corrigé par la Phase 5 : le flux à réutiliser n'est pas celui de LibOpenRaid,
+   qui ne se charge pas hors retail, mais celui du CD Tracker** — les cooldowns
+   que chaque joueur annonce lui-même sur `Core/Comm.lua`. La rotation ne mesure
+   donc rien : elle ordonne ce que le CD Tracker sait, et n'existe pas sans lui
+   (`/mbs rotation` le dit plutôt que de faire semblant). Le sous-ensemble
+   `interrupt` vient de `ns.InterruptSpells`, la liste par classe déjà curée par
+   l'alerte kick.
+2. [x] Round-robin sur les joueurs dont le kick est réellement disponible.
+   **Un point à corriger dans la formulation d'origine : « dans l'ordre du
+   groupe » n'existe pas.** `party1` n'est pas le même joueur pour toi et pour
+   moi ; deux clients ordonneraient différemment et désigneraient chacun
+   quelqu'un d'autre. L'ordre est donc le **tri par nom** des porteurs
+   d'interrupt : déterministe, identique partout, et sans un seul message réseau
+   de plus pour se mettre d'accord.
+   Un joueur n'entre dans la file que s'il a annoncé son interrupt au moins une
+   fois : « je ne sais pas » n'est pas « c'est prêt ». Le tour avance même quand
+   ce n'est pas le désigné qui a kické — la rotation suit ce qui s'est passé, elle
+   ne le corrige pas.
+3. [x] **`SPELL_CAST_SUCCESS` sur les spellId d'interrupt, jamais `SPELL_INTERRUPT`.**
+   Un kick lancé dans le vide part quand même en cooldown sans générer aucun
+   `SPELL_INTERRUPT` ; écouter le mauvais événement désignerait un joueur qui n'a
+   plus son kick. C'est testé dans les deux sens : un `SPELL_CAST_SUCCESS`
+   d'interrupt fait tourner la file, un `SPELL_INTERRUPT` ne fait rien.
+4. [x] Ce que la rotation change à l'alerte kick — **le vrai livrable du module**,
+   et ce que la roadmap ne disait pas : une file passive n'aurait servi à rien.
+   Quand le tour est à un autre, l'alerte affiche « ATTENDS » en gris, sans son
+   ni flash, et nomme celui qui doit kicker. Elle ne disparaît jamais : au bout
+   du délai de remise en jeu (1,2 s, `/mbs rotation delai`), elle redevient un
+   `KICK` franc pour tout le monde. Le désigné peut être mort, silencé ou hors de
+   portée, et **un kick manqué coûte plus cher qu'un kick en double**. Le
+   couplage ne va que dans ce sens : sans le module de rotation, l'alerte kick
+   est exactement celle d'avant.
+5. [x] Cadre de file déplaçable (`/mbs unlock`, `/mbs test`), affiché en combat
+   seulement. « En combat » se lit sur le **groupe**, pas sur
+   `PLAYER_REGEN_ENABLED` : celui-ci tombe aussi quand tu meurs, et la file
+   disparaîtrait au moment où elle sert le plus.
+6. [ ] Override manuel de priorité : toujours pas en v1. À ajouter si le
+   round-robin se révèle insuffisant à l'usage.
 
 ---
 

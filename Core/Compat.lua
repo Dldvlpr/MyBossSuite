@@ -405,6 +405,22 @@ ns.IsInRaidGroup = function()
     return (GetNumRaidMembers and GetNumRaidMembers() or 0) > 0
 end
 
+--- Nom complet d'une unite : "Nom" ou "Nom-Royaume". C'est la forme que livre
+-- un message addon, et donc la seule qui distingue deux homonymes de royaumes
+-- differents. Deux modules la lisent (CD Tracker, rotation d'interrupt) : deux
+-- copies auraient fini par diverger sur le cas du royaume vide.
+function ns.UnitFullName(unit)
+    local name, realm = UnitName(unit)
+    if not name then return nil end
+    if realm and realm ~= "" then return name .. "-" .. realm end
+    return name
+end
+
+--- Nom court, sans royaume : ce qu'on affiche, jamais ce qu'on stocke.
+function ns.ShortName(name)
+    return (name and (name:match("^([^%-]+)") or name)) or "?"
+end
+
 --- Prefixe et nombre des unites de groupe (hors joueur) : "raid", N ou
 -- "party", N-1. Un seul point de verite pour parcourir le groupe, quel que
 -- soit le client.

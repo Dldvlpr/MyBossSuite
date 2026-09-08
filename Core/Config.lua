@@ -241,6 +241,7 @@ local HELP = {
     "  |cffffff00/mbs test boss <npcId>|r — rejoue la timeline d'un boss hors combat",
     "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume|sync on/off]",
     "  |cffffff00/mbs cd|r [status|list|sync|barres|annonce|soi|kick|estimes on/off]",
+    "  |cffffff00/mbs rotation|r [status|list|reset|cadre|combat|retenue on/off|delai <s>]",
     "  |cffffff00/mbs anchor|r [<spellId>|remove <spellId>] — ancre dediee pour les barres d'un sort",
     "  |cffffff00/mbs list|r — etat des modules",
     "  |cffffff00/mbs enable|disable|toggle <module>|r",
@@ -734,6 +735,66 @@ local function HandleBoss(arg1, arg2)
 end
 
 --------------------------------------------------------------------------------
+-- Rotation d'interrupt (/mbs rotation)
+--------------------------------------------------------------------------------
+
+local ROT_FLAGS = {
+    cadre = "list", frame = "list",
+    combat = "combatOnly", combatonly = "combatOnly",
+    retenue = "hold", hold = "hold", attente = "hold",
+}
+
+local function HandleRotation(arg1, arg2)
+    local module = ns:GetModule("interruptRotation")
+    if not module then return end
+
+    local option = arg1 and arg1:lower()
+    if not option or option == "" or option == "status" then
+        return PrintStatus(module)
+    end
+
+    local config = module:GetConfig()
+    if not config then return end
+    local value = (arg2 or ""):match("^%S+")
+
+    if option == "list" or option == "liste" or option == "file" then
+        local lines = module:ListLines()
+        ns.Print(("file d'interrupt : %d joueur(s)"):format(#lines))
+        for i = 1, #lines do print("  " .. lines[i]) end
+        if #lines == 0 then
+            print("    |cffaaaaaa(personne n'a encore annonce d'interrupt — /mbs cd sync)|r")
+        end
+        return
+    end
+
+    if option == "reset" then
+        module:Reset()
+        return ns.Print("rotation remise au debut de la file.")
+    end
+
+    if option == "delai" or option == "handoff" then
+        local seconds = tonumber(value)
+        if not seconds or seconds < 0 then
+            return ns.Print("usage : /mbs rotation delai <secondes>  (0 = ne jamais rendre la main)")
+        end
+        config.handoff = seconds
+        return PrintStatus(module)
+    end
+
+    local field = ROT_FLAGS[option]
+    if not field then
+        return ns.Print("usage : /mbs rotation [status|list|reset|cadre on/off|"
+            .. "combat on/off|retenue on/off|delai <secondes>]")
+    end
+
+    local bool = ParseBool(value)
+    if bool == nil then bool = not (config[field] ~= false) end
+    config[field] = bool
+    module:UpdateVisibility()
+    PrintStatus(module)
+end
+
+--------------------------------------------------------------------------------
 -- Module CD Tracker (/mbs cd)
 --------------------------------------------------------------------------------
 
@@ -868,6 +929,8 @@ SlashCmdList["MYBOSSSUITE"] = function(input)
         HandleBoss(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "cd" then
         HandleCD(arg1 ~= "" and arg1 or nil, arg2)
+    elseif cmd == "rotation" or cmd == "rot" then
+        HandleRotation(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "profile" then
         HandleProfile(arg1 ~= "" and arg1 or nil, arg2 ~= "" and arg2 or nil)
     elseif cmd == "debug" then

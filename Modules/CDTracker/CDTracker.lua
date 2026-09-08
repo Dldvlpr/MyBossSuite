@@ -84,16 +84,10 @@ local lastAnswer = 0
 -- meme que le module soit initialise, jamais lever.
 M.known = {}
 
-local function UnitFullName(unit)
-    local name, realm = UnitName(unit)
-    if not name then return nil end
-    if realm and realm ~= "" then return name .. "-" .. realm end
-    return name
-end
-
-local function ShortName(unit)
-    return (unit and (unit:match("^([^%-]+)") or unit)) or "?"
-end
+-- Nom complet ("Nom" ou "Nom-Royaume") et nom court : dans Compat, parce que la
+-- rotation d'interrupt lit exactement les memes noms que ce module.
+local UnitFullName = ns.UnitFullName
+local ShortName    = ns.ShortName
 
 --------------------------------------------------------------------------------
 -- Identite d'un joueur
@@ -335,10 +329,31 @@ function M:Knows(unit, spellId)
     return byUnit ~= nil and byUnit[spellId] == true
 end
 
+--- Retient qu'un joueur possede ce sort. Signale les nouveautes, et rien
+-- d'autre : la rotation d'interrupt tient en cache la liste des porteurs (son
+-- chemin chaud la relit cinq fois par seconde), et c'est ici qu'elle change.
+-- Une re-annonce d'un sort deja connu ne change rien et n'emet rien.
 function M:NoteKnown(unit, spellId)
     local byUnit = self.known[unit]
     if not byUnit then byUnit = {}; self.known[unit] = byUnit end
+    if byUnit[spellId] then return false end
     byUnit[spellId] = true
+    ns.EventBus:Fire("CD_KNOWN_CHANGED", unit, spellId)
+    return true
+end
+
+--- Sorts qu'on sait possedes par ce joueur, parce qu'il les a annonces.
+-- La rotation d'interrupt (phase 6) s'en sert pour savoir QUI porte un kick
+-- sans fouiller dans le magasin : le magasin ne contient que des cooldowns en
+-- cours, et un kick pret n'y laisse rien. Sans cet accesseur, un joueur pret
+-- serait indistinguable d'un joueur inconnu.
+function M:KnownSpells(unit)
+    local out = {}
+    local byUnit = self.known[unit]
+    if not byUnit then return out end
+    for spellId in pairs(byUnit) do out[#out + 1] = spellId end
+    table.sort(out)
+    return out
 end
 
 --------------------------------------------------------------------------------
@@ -668,9 +683,14 @@ function M:PruneRoster()
     for unit in pairs(tracked) do
         if not present[unit] then self:ClearUnit(unit) end
     end
+    local forgotten = false
     for unit in pairs(self.known) do
-        if not present[unit] then self.known[unit] = nil end
+        if not present[unit] then
+            self.known[unit] = nil
+            forgotten = true
+        end
     end
+    if forgotten then ns.EventBus:Fire("CD_KNOWN_CHANGED") end
 end
 
 function M:GROUP_ROSTER_UPDATE()
