@@ -548,6 +548,59 @@ Limite honnête à documenter dans le README : précision réelle uniquement si 
 
 ---
 
+## Phase 7 — Alertes à l'écran (kick + move)
+
+Deux modules qui partagent une même brique : `Core/Alerts.lua`, une alerte plein
+écran (gros texte, sous-titre, icône, flash) doublée d'un son, entièrement
+paramétrable et déplaçable comme n'importe quel autre élément.
+
+- [x] `Core/Alerts.lua` — affichage + son + presets, un registre d'alertes que le
+  panneau et `/mbs alert` parcourent génériquement.
+- [x] `Modules/InterruptAlert/InterruptAlert.lua` — alerte **KICK**.
+- [x] `Modules/MoveAlert/MoveAlert.lua` — alerte **MOVE** (façon GTFO).
+
+### 7.1 Alerte kick
+
+Trois conditions vérifiées **ensemble et en continu** pendant l'incantation :
+
+1. la cible (ou le focus) incante ;
+2. l'incantation n'est pas protégée (`notInterruptible`) ;
+3. **ton** interrupt est réellement disponible, et la cible à portée.
+
+Le point qui décide de la crédibilité du module : un ticker de 0,15 s tourne
+pendant l'incantation, parce qu'un kick qui revient de cooldown au milieu du cast
+n'est signalé par aucun événement. Sans lui, l'alerte n'apparaît jamais dans le
+cas qui compte le plus.
+
+Détection de l'interrupt : table par classe, filtrée par ce que le joueur connaît
+vraiment. `IsSpellKnown` teste un id exact, ce qui ne suffit pas en classic où
+chaque rang a son id — d'où le repli par nom dans `ns.KnowsSpell`. Override
+manuel via `/mbs kick spell <id>` pour les cas non couverts (interrupt de
+familier notamment).
+
+Repli combat log : sur les clients les plus anciens, `UnitCastingInfo` ne répond
+rien sur une unité hostile. `SPELL_CAST_START` prend alors le relais, filtré sur
+le GUID de la cible et du focus pour ne rien coûter en raid.
+
+### 7.2 Alerte move (GTFO)
+
+GTFO s'appuie sur une base de sorts maintenue à la main : non reprenable
+(licence, et elle ne couvre pas les six flavors). La détection repose donc sur
+une heuristique explicite plus une liste personnelle qui se remplit seule :
+
+1. dégâts **périodiques** subis **sans debuff correspondant sur toi** → zone au
+   sol. C'est le cœur : un DoT est une aura que tu portes, s'écarter n'y change
+   rien ; une zone tape sans rien poser sur toi ;
+2. dégâts d'environnement (feu, lave, slime) → zone ;
+3. tout sort de ta liste personnelle → zone dès le premier tick, dégâts directs
+   compris.
+
+Les dégâts directs d'un sort inconnu n'alertent **jamais** : sans base de données
+curée, la moindre attaque de boss ferait hurler l'addon. C'est la limite assumée
+du module, et la raison de la liste personnelle (`/mbs move add|ignore`).
+
+---
+
 ## Ordre de build
 
 1. **Compat + Scheduler + DB + EventBus + ModuleLoader** — rien ne peut être écrit proprement avant.
@@ -556,6 +609,7 @@ Limite honnête à documenter dans le README : précision réelle uniquement si 
 4. **Boss Timer** — le plus gros morceau (Phases 1 à 3), engine puis ingestion WCL.
 5. **CD Tracker** — après validation que LibOpenRaid tourne sur tes flavors.
 6. **Interrupt Rotation** — réutilise la comm du CD Tracker, dernier car dépendant.
+7. **Alertes kick et move** — indépendantes des phases 5 et 6 (aucune comm, aucune data externe), donc livrables sans attendre LibOpenRaid.
 
 Livrable intermédiaire visé après l'étape 3 : un addon installable, configurable, avec un module fonctionnel. Ça vaut mieux que six modules à moitié faits.
 
@@ -571,10 +625,14 @@ Core/
   EventBus.lua
   DB.lua
   Anchors.lua
+  Bars.lua
+  Alerts.lua
   Config.lua
   ModuleLoader.lua
 Modules/
   SwingTimer/SwingTimer.lua
+  InterruptAlert/InterruptAlert.lua
+  MoveAlert/MoveAlert.lua
   BossTimer/
     BossTimer.lua
     Data/<flavor>/<Raid>/<Boss>.lua

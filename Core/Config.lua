@@ -110,6 +110,41 @@ function Config:BuildPanel()
         y = y - 26
     end
 
+    y = y - 14
+    local alertsTitle = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    alertsTitle:SetPoint("TOPLEFT", panel, "TOPLEFT", 16, y)
+    alertsTitle:SetText("Alertes")
+    y = y - 20
+
+    -- Une ligne par alerte declaree : son, visuel, et un apercu immediat. Le
+    -- reste du parametrage (texte, couleur, taille, son choisi) passe par
+    -- /mbs alert, qui ne demande pas de widget dedie.
+    panel.alertRows = {}
+    local alertKeys = ns.Alerts:SortedKeys()
+    for i = 1, #alertKeys do
+        local key = alertKeys[i]
+        local entry = ns.Alerts:Get(key)
+
+        local label = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        label:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, y - 6)
+        label:SetWidth(84)
+        label:SetJustifyH("LEFT")
+        label:SetText(entry.label)
+
+        local soundCheck = CreateCheckbox(panel, "son", 104, y, function(checked)
+            ns.Alerts:Set(key, "sound", checked)
+        end)
+        local visualCheck = CreateCheckbox(panel, "visuel", 166, y, function(checked)
+            ns.Alerts:Set(key, "visual", checked)
+        end)
+        CreateButton(panel, "Test", 60, 244, y - 2, function()
+            ns.Alerts:Preview(key)
+        end)
+
+        panel.alertRows[key] = { sound = soundCheck, visual = visualCheck }
+        y = y - 26
+    end
+
     y = y - 10
     CreateButton(panel, "Unlock / Lock", 130, 16, y, function()
         ns.Anchors:ToggleUnlock()
@@ -143,6 +178,11 @@ function Config:Refresh()
     if not panel or not panel:IsShown() then return end
     for name, check in pairs(panel.checks) do
         check:SetChecked(ns:IsModuleEnabled(name))
+    end
+    for key, row in pairs(panel.alertRows) do
+        local config = ns.Alerts:GetConfig(key)
+        row.sound:SetChecked(config.sound ~= false)
+        row.visual:SetChecked(config.visual ~= false)
     end
     panel.profileText:SetText(("Profil : |cffffffff%s|r\nAncres : %s   |   Test : %s")
         :format(ns.DB:GetProfileName() or "?",
@@ -201,6 +241,9 @@ local HELP = {
     "  |cffffff00/mbs test boss <npcId>|r — rejoue la timeline d'un boss hors combat",
     "  |cffffff00/mbs list|r — etat des modules",
     "  |cffffff00/mbs enable|disable|toggle <module>|r",
+    "  |cffffff00/mbs alert|r [kick|move] [texte|couleur|taille|duree|son|visuel|flash|test|reset]",
+    "  |cffffff00/mbs kick|r [spell <id>|auto|focus|portee|dispo on/off]",
+    "  |cffffff00/mbs move|r [list|add|remove|ignore|unignore|clear|seuil <pct>|apprentissage on/off]",
     "  |cffffff00/mbs profile|r [nom|list|copy <nom>|reset]",
     "  |cffffff00/mbs debug|r — bascule les messages de debug",
 }
@@ -260,6 +303,282 @@ local function HandleTest(arg1, arg2)
     Config:Refresh()
 end
 
+--------------------------------------------------------------------------------
+-- Alertes parametrables (/mbs alert)
+--------------------------------------------------------------------------------
+
+local function Words(text)
+    local out = {}
+    for word in (text or ""):gmatch("%S+") do out[#out + 1] = word end
+    return out
+end
+
+local TRUE_WORDS  = { on = true, ["1"] = true, oui = true, yes = true, ["true"] = true }
+local FALSE_WORDS = { off = true, ["0"] = true, non = true, no = true, ["false"] = true }
+
+--- Retourne nil quand le mot n'est pas un booleen : l'appelant peut alors le
+-- traiter comme une valeur (un nom de son, par exemple).
+local function ParseBool(word)
+    if not word then return nil end
+    word = word:lower()
+    if TRUE_WORDS[word] then return true end
+    if FALSE_WORDS[word] then return false end
+    return nil
+end
+
+-- Noms francais et anglais acceptes indifferemment : personne ne devrait avoir
+-- a deviner dans quelle langue l'addon a ete ecrit.
+local ALERT_FIELDS = {
+    texte = "text",     text     = "text",
+    couleur = "color",  color    = "color",
+    taille = "fontSize", size    = "fontSize",
+    duree = "duration", duration = "duration",
+    son = "sound",      sound    = "sound",
+    visuel = "visual",  visual   = "visual",
+    flash = "flash",
+    canal = "channel",  channel  = "channel",
+}
+
+local function AlertValue(config, field)
+    local value = config[field]
+    if value == nil then return ns.ALERT_DEFAULTS[field] end
+    return value
+end
+
+local function PrintAlert(key)
+    local entry  = ns.Alerts:Get(key)
+    local config = ns.Alerts:GetConfig(key)
+    local color  = AlertValue(config, "color")
+    print(("  |cffffff00%s|r — %s"):format(key, entry.label))
+    print(("     texte |cffffffff%s|r   taille %s   duree %ss   couleur %.2f %.2f %.2f")
+        :format(tostring(AlertValue(config, "text")),
+                tostring(AlertValue(config, "fontSize")),
+                tostring(AlertValue(config, "duration")),
+                color[1], color[2], color[3]))
+    print(("     visuel %s   flash %s   son %s |cffaaaaaa(%s)|r"):format(
+        AlertValue(config, "visual") ~= false and "on" or "off",
+        AlertValue(config, "flash") ~= false and "on" or "off",
+        AlertValue(config, "sound") ~= false and "on" or "off",
+        tostring(AlertValue(config, "soundName"))))
+end
+
+local function ListAlerts()
+    ns.Print("alertes :")
+    local keys = ns.Alerts:SortedKeys()
+    for i = 1, #keys do PrintAlert(keys[i]) end
+    print("  |cffaaaaaa/mbs alert <cle> son <preset|id|chemin>|r — presets : "
+        .. "raidwarning, readycheck, alarm, ping, murloc")
+end
+
+local function HandleAlert(arg1, arg2)
+    if not arg1 or arg1 == "" then return ListAlerts() end
+
+    local key = arg1:lower()
+    if not ns.Alerts:Get(key) then
+        ns.Print(("alerte inconnue : %s (essaie /mbs alert)"):format(arg1))
+        return
+    end
+
+    local words = Words(arg2)
+    local property = words[1] and words[1]:lower()
+
+    if not property then return PrintAlert(key) end
+
+    if property == "test" or property == "apercu" then
+        ns.Alerts:Preview(key)
+        return
+    end
+
+    if property == "reset" then
+        if ns.Alerts:Reset(key) then
+            ns.Print(("alerte %s remise par defaut."):format(key))
+            PrintAlert(key)
+        end
+        return
+    end
+
+    local field = ALERT_FIELDS[property]
+    if not field then
+        ns.Print(("propriete inconnue : %s"):format(property))
+        return
+    end
+
+    if field == "sound" then
+        -- `son off` coupe le son ; `son alarm` choisit lequel jouer et le
+        -- rallume, parce que choisir un son puis devoir le rallumer serait idiot.
+        local bool = ParseBool(words[2])
+        if bool ~= nil then
+            ns.Alerts:Set(key, "sound", bool)
+        elseif words[2] then
+            local value = arg2:match("^%S+%s+(.*)$")
+            ns.Alerts:Set(key, "soundName", tonumber(value) or value)
+            ns.Alerts:Set(key, "sound", true)
+            ns.Alerts:PlaySound(key, true)
+        end
+    elseif field == "visual" or field == "flash" then
+        local bool = ParseBool(words[2])
+        if bool == nil then
+            ns.Print(("usage : /mbs alert %s %s on|off"):format(key, property))
+            return
+        end
+        ns.Alerts:Set(key, field, bool)
+    elseif field == "color" then
+        local r, g, b = tonumber(words[2]), tonumber(words[3]), tonumber(words[4])
+        if not r or not g or not b then
+            ns.Print(("usage : /mbs alert %s couleur <r> <g> <b>  (0 a 1)"):format(key))
+            return
+        end
+        ns.Alerts:Set(key, "color", { r, g, b })
+    elseif field == "fontSize" or field == "duration" then
+        local value = tonumber(words[2])
+        if not value or value <= 0 then
+            ns.Print(("usage : /mbs alert %s %s <nombre>"):format(key, property))
+            return
+        end
+        ns.Alerts:Set(key, field, value)
+    else
+        local value = arg2:match("^%S+%s+(.*)$")
+        if not value or value == "" then
+            ns.Print(("usage : /mbs alert %s %s <valeur>"):format(key, property))
+            return
+        end
+        ns.Alerts:Set(key, field, value)
+    end
+
+    PrintAlert(key)
+end
+
+--------------------------------------------------------------------------------
+-- Module kick (/mbs kick)
+--------------------------------------------------------------------------------
+
+local function PrintStatus(module)
+    if not module then return end
+    ns.Print(("%s : %s"):format(module.title or module.name,
+        module.isEnabled and "|cff00ff00actif|r" or "|cffff0000inactif|r"))
+    local lines = module.StatusLines and module:StatusLines()
+    for i = 1, #(lines or {}) do print("  " .. lines[i]) end
+end
+
+local KICK_FLAGS = {
+    focus  = "watchFocus",
+    portee = "checkRange", range = "checkRange",
+    dispo  = "onlyWhenReady", ready = "onlyWhenReady",
+}
+
+local function HandleKick(arg1, arg2)
+    local module = ns:GetModule("interruptAlert")
+    if not module then return end
+
+    local option = arg1 and arg1:lower()
+    if not option or option == "" or option == "status" then
+        return PrintStatus(module)
+    end
+
+    local config = module:GetConfig()
+    if not config then return end
+
+    if option == "spell" then
+        local value = (arg2 or ""):match("^%S+")
+        if value == "auto" or value == "" or value == nil then
+            config.spellId = nil
+        else
+            local spellId = tonumber(value)
+            if not spellId then
+                ns.Print("usage : /mbs kick spell <spellId> | auto")
+                return
+            end
+            config.spellId = spellId
+        end
+        module:ResolveInterrupt()
+        return PrintStatus(module)
+    end
+
+    local field = KICK_FLAGS[option]
+    if not field then
+        ns.Print("usage : /mbs kick [status | spell <id>|auto | focus|portee|dispo on|off]")
+        return
+    end
+
+    local bool = ParseBool((arg2 or ""):match("^%S+"))
+    if bool == nil then bool = not (config[field] ~= false) end
+    config[field] = bool
+    module:UpdateWatchedGUIDs()
+    PrintStatus(module)
+end
+
+--------------------------------------------------------------------------------
+-- Module move (/mbs move)
+--------------------------------------------------------------------------------
+
+local function PrintSpellList(module, ids, title)
+    if #ids == 0 then
+        print(("  %s : |cffaaaaaa(vide)|r"):format(title))
+        return
+    end
+    print(("  %s :"):format(title))
+    for i = 1, #ids do
+        print(("    %d — %s"):format(ids[i], ns.GetSpellName(ids[i]) or "?"))
+    end
+end
+
+local function HandleMove(arg1, arg2)
+    local module = ns:GetModule("moveAlert")
+    if not module then return end
+
+    local option = arg1 and arg1:lower()
+    if not option or option == "" or option == "status" then
+        return PrintStatus(module)
+    end
+
+    local config = module:GetConfig()
+    if not config then return end
+
+    local value = (arg2 or ""):match("^%S+")
+    local spellId = tonumber(value)
+
+    if option == "list" then
+        ns.Print("alerte move :")
+        PrintSpellList(module, module:ListSpells(), "zones connues")
+        PrintSpellList(module, module:ListIgnored(), "sorts ignores")
+    elseif option == "add" then
+        if not spellId then return ns.Print("usage : /mbs move add <spellId>") end
+        config.spells[spellId] = true
+        config.ignored[spellId] = nil
+        ns.Print(("zone ajoutee : %d (%s)"):format(spellId, ns.GetSpellName(spellId) or "?"))
+    elseif option == "remove" then
+        if not spellId then return ns.Print("usage : /mbs move remove <spellId>") end
+        ns.Print(module:Forget(spellId) and ("zone retiree : " .. spellId)
+            or ("ce sort n'est pas dans la liste : " .. spellId))
+    elseif option == "ignore" then
+        if not spellId then return ns.Print("usage : /mbs move ignore <spellId>") end
+        module:Ignore(spellId)
+        ns.Print(("sort ignore : %d (%s)"):format(spellId, ns.GetSpellName(spellId) or "?"))
+    elseif option == "unignore" then
+        if not spellId then return ns.Print("usage : /mbs move unignore <spellId>") end
+        ns.Print(module:Unignore(spellId) and ("sort reactive : " .. spellId)
+            or ("ce sort n'etait pas ignore : " .. spellId))
+    elseif option == "clear" then
+        wipe(config.spells)
+        ns.Print("liste des zones videe.")
+    elseif option == "seuil" or option == "threshold" then
+        local pct = tonumber(value)
+        if not pct or pct < 0 or pct > 100 then
+            return ns.Print("usage : /mbs move seuil <pourcentage des PV max>")
+        end
+        config.threshold = pct / 100
+        PrintStatus(module)
+    elseif option == "apprentissage" or option == "learn" then
+        local bool = ParseBool(value)
+        if bool == nil then bool = not (config.learn ~= false) end
+        config.learn = bool
+        PrintStatus(module)
+    else
+        ns.Print("usage : /mbs move [status|list|add|remove|ignore|unignore|clear|"
+            .. "seuil <pct>|apprentissage on|off]")
+    end
+end
+
 SLASH_MYBOSSSUITE1 = "/mbs"
 SLASH_MYBOSSSUITE2 = "/mybosssuite"
 
@@ -291,6 +610,12 @@ SlashCmdList["MYBOSSSUITE"] = function(input)
         ns:ToggleModule(arg1)
         ns.Print(("%s : %s"):format(arg1, ns:IsModuleEnabled(arg1) and "actif" or "inactif"))
         Config:Refresh()
+    elseif cmd == "alert" or cmd == "alerte" then
+        HandleAlert(arg1 ~= "" and arg1 or nil, arg2)
+    elseif cmd == "kick" then
+        HandleKick(arg1 ~= "" and arg1 or nil, arg2)
+    elseif cmd == "move" then
+        HandleMove(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "profile" then
         HandleProfile(arg1 ~= "" and arg1 or nil, arg2 ~= "" and arg2 or nil)
     elseif cmd == "debug" then

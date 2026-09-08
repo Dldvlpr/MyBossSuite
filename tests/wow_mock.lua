@@ -52,14 +52,28 @@ _G.WOW_PROJECT_MISTS_CLASSIC = 19
 _G.UISpecialFrames = {}
 _G.SlashCmdList = {}
 _G.SOUNDKIT = { RAID_WARNING = 1 }
-function _G.PlaySound() end
+
+-- Les sons joues sont enregistres : c'est la seule facon de verifier qu'une
+-- alerte muette l'est vraiment.
+Mock.sounds = {}
+
+function _G.PlaySound(id, channel)
+    Mock.sounds[#Mock.sounds + 1] = { kit = id, channel = channel }
+end
+
+function _G.PlaySoundFile(path, channel)
+    Mock.sounds[#Mock.sounds + 1] = { file = path, channel = channel }
+end
 
 --------------------------------------------------------------------------------
 -- Units
 --------------------------------------------------------------------------------
 
 Mock.units = {
-    player = { guid = "Player-0-0001", name = "Testeur", health = 100, healthMax = 100, exists = true },
+    player = {
+        guid = "Player-0-0001", name = "Testeur", class = "ROGUE",
+        health = 100, healthMax = 100, exists = true,
+    },
     target = nil,
 }
 
@@ -69,6 +83,19 @@ function _G.UnitName(unit) local u = Mock.units[unit] return u and u.name end
 function _G.UnitHealth(unit) local u = Mock.units[unit] return u and u.health or 0 end
 function _G.UnitHealthMax(unit) local u = Mock.units[unit] return u and u.healthMax or 0 end
 function _G.UnitAttackSpeed() return Mock.attackSpeed or 2.6 end
+function _G.UnitClass(unit)
+    local u = Mock.units[unit]
+    return u and u.class or nil, u and u.class or nil
+end
+function _G.UnitCanAttack(_, unit)
+    local u = Mock.units[unit]
+    return u ~= nil and u.friendly ~= true
+end
+function _G.UnitIsDead(unit)
+    local u = Mock.units[unit]
+    return u ~= nil and u.dead == true
+end
+function _G.UnitIsDeadOrGhost(unit) return UnitIsDead(unit) end
 function _G.GetRealmName() return "Mock" end
 function _G.GetNumGroupMembers() return 1 end
 function _G.IsInRaid() return false end
@@ -80,7 +107,18 @@ function _G.IsInRaid() return false end
 Mock.spells = {
     [17086] = { name = "Flame Breath", icon = "icon-17086" },
     [18435] = { name = "Fireball Volley", icon = "icon-18435" },
+    [1766]  = { name = "Kick", icon = "icon-1766" },
+    [2139]  = { name = "Counterspell", icon = "icon-2139" },
+    [22271] = { name = "Fire Patch", icon = "icon-22271" },
+    [22272] = { name = "Corruption", icon = "icon-22272" },
+    [22273] = { name = "Cleave", icon = "icon-22273" },
 }
+
+-- Grimoire du personnage mock : un voleur qui connait Kick, et rien d'autre.
+Mock.knownSpells = { [1766] = true }
+
+-- [spellId] = { start = , duration = } — absent = pret.
+Mock.cooldowns = {}
 
 function _G.GetSpellInfo(id)
     local spell = Mock.spells[id]
@@ -93,8 +131,80 @@ function _G.GetSpellTexture(id)
     return spell and spell.icon
 end
 
-function _G.GetSpellCooldown() return 0, 0, true end
-function _G.UnitAura() return nil end
+--- Accepte un id ou un nom, comme le vrai client : c'est ce qui permet de
+-- tester le repli par nom de `ns.KnowsSpell` (les rangs classic).
+local function SpellIdOf(identifier)
+    if type(identifier) == "number" then return identifier end
+    for id, spell in pairs(Mock.spells) do
+        if spell.name == identifier then return id end
+    end
+    return nil
+end
+
+Mock.SpellIdOf = SpellIdOf
+
+function _G.GetSpellCooldown(identifier)
+    local id = SpellIdOf(identifier)
+    if not id or not Mock.knownSpells[id] then return nil end
+    local cooldown = Mock.cooldowns[id]
+    if not cooldown then return 0, 0, true end
+    return cooldown.start, cooldown.duration, true
+end
+
+function _G.IsSpellKnown(id) return Mock.knownSpells[id] == true end
+
+function _G.IsSpellInRange(_, unit)
+    if Mock.outOfRange then return 0 end
+    return Mock.units[unit] and 1 or nil
+end
+
+--------------------------------------------------------------------------------
+-- Incantations
+--------------------------------------------------------------------------------
+
+-- [unit] = { name, icon, spellId, notInterruptible, channel }
+Mock.casts = {}
+
+function Mock.SetCast(unit, spellId, notInterruptible, channel)
+    if not spellId then Mock.casts[unit] = nil return end
+    local spell = Mock.spells[spellId]
+    Mock.casts[unit] = {
+        name             = spell and spell.name or "?",
+        icon             = spell and spell.icon,
+        spellId          = spellId,
+        notInterruptible = notInterruptible and true or false,
+        channel          = channel and true or false,
+    }
+end
+
+function _G.UnitCastingInfo(unit)
+    local cast = Mock.casts[unit]
+    if not cast or cast.channel then return nil end
+    return cast.name, nil, cast.icon, Mock.now * 1000, (Mock.now + 2) * 1000,
+        false, "cast1", cast.notInterruptible, cast.spellId
+end
+
+function _G.UnitChannelInfo(unit)
+    local cast = Mock.casts[unit]
+    if not cast or not cast.channel then return nil end
+    return cast.name, nil, cast.icon, Mock.now * 1000, (Mock.now + 2) * 1000,
+        false, cast.notInterruptible, cast.spellId
+end
+
+--------------------------------------------------------------------------------
+-- Auras
+--------------------------------------------------------------------------------
+
+Mock.auras = {}   -- [unit] = { { spellId = , name = }, ... }
+
+function _G.UnitAura(unit, index)
+    local list = Mock.auras[unit]
+    local aura = list and list[index]
+    if not aura then return nil end
+    local spell = Mock.spells[aura.spellId]
+    return aura.name or (spell and spell.name) or "?", spell and spell.icon, 1, nil,
+        10, Mock.now + 10, "boss1", nil, nil, aura.spellId
+end
 function _G.SendAddonMessage() end
 function _G.RegisterAddonMessagePrefix() end
 
@@ -133,12 +243,21 @@ local NOOP_METHODS = {
     "RegisterForDrag", "StartMoving", "StopMovingOrSizing", "SetFrameStrata",
     "SetFrameLevel", "SetStatusBarTexture", "SetMinMaxValues", "SetValue",
     "SetTexCoord", "SetJustifyH", "SetTexture", "SetColorTexture", "SetAlpha",
-    "SetStatusBarColor", "SetText", "SetChecked", "GetChecked", "SetWidth",
+    "SetStatusBarColor", "SetChecked", "GetChecked", "SetWidth",
     "SetHeight", "SetAllPoints", "SetFontObject", "SetNormalTexture",
-    "RegisterForClicks", "SetHitRectInsets", "SetBackdrop",
+    "RegisterForClicks", "SetHitRectInsets", "SetBackdrop", "SetTextColor",
+    "SetShadowOffset", "SetDrawLayer",
 }
 
 for _, name in ipairs(NOOP_METHODS) do FrameMeta[name] = NoOp end
+
+-- Le texte est conserve : les tests d'alerte verifient ce qui est affiche.
+function FrameMeta:SetText(text) self.text = text end
+function FrameMeta:GetText() return self.text end
+function FrameMeta:SetFont(path, size, flags)
+    self.font, self.fontSize, self.fontFlags = path, size, flags
+end
+function FrameMeta:GetFont() return self.font, self.fontSize, self.fontFlags end
 
 function FrameMeta:GetFrameLevel() return 1 end
 function FrameMeta:GetName() return self.frameName end
@@ -228,14 +347,22 @@ function Mock.InstallRetail()
 
     function _G.GetBuildInfo() return "11.2.0", "60000", "Jan 1 2026", 110200 end
 
+    -- Le preset "alarm" doit choisir ce kit-la en retail, et retomber sur
+    -- RAID_WARNING en classic ou il n'existe pas.
+    _G.SOUNDKIT.UI_RAID_BOSS_WHISPER_WARNING = 42
+
     _G.C_Spell = {
         GetSpellInfo = function(id)
             local spell = Mock.spells[id]
             if not spell then return nil end
             return { name = spell.name, iconID = spell.icon, castTime = 0 }
         end,
-        GetSpellCooldown = function()
-            return { startTime = 0, duration = 0, isEnabled = true }
+        GetSpellCooldown = function(identifier)
+            local id = Mock.SpellIdOf(identifier)
+            if not id or not Mock.knownSpells[id] then return nil end
+            local cooldown = Mock.cooldowns[id]
+            if not cooldown then return { startTime = 0, duration = 0, isEnabled = true } end
+            return { startTime = cooldown.start, duration = cooldown.duration, isEnabled = true }
         end,
         GetSpellTexture = function(id)
             local spell = Mock.spells[id]
@@ -244,7 +371,21 @@ function Mock.InstallRetail()
     }
 
     _G.C_UnitAuras = {
-        GetAuraDataByIndex = function() return nil end,
+        GetAuraDataByIndex = function(unit, index)
+            local list = Mock.auras[unit]
+            local aura = list and list[index]
+            if not aura then return nil end
+            local spell = Mock.spells[aura.spellId]
+            return {
+                name           = aura.name or (spell and spell.name) or "?",
+                icon           = spell and spell.icon,
+                applications   = 1,
+                duration       = 10,
+                expirationTime = Mock.now + 10,
+                sourceUnit     = "boss1",
+                spellId        = aura.spellId,
+            }
+        end,
     }
 
     _G.C_ChatInfo = {
@@ -257,6 +398,14 @@ function Mock.InstallRetail()
             return field == "Version" and "0.1.0" or nil
         end,
     }
+
+    -- Le module kick doit passer par ns.IsSpellInRange : la variante retail
+    -- rend un booleen la ou l'ancienne API rendait 0/1.
+    _G.C_Spell.IsSpellInRange = function(_, unit)
+        if Mock.outOfRange then return false end
+        if not Mock.units[unit] then return nil end
+        return true
+    end
 
     _G.C_EncounterJournal = {}
     _G.C_LossOfControl = {}
@@ -354,6 +503,7 @@ end
 
 function Mock.Reset()
     Mock.printed = {}
+    Mock.sounds = {}
 end
 
 function Mock.FindPrinted(pattern)

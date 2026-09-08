@@ -1,6 +1,6 @@
 ## Interface: 11507
 ## Title: MyBossSuite
-## Notes: Boss timers, swing timer, CD tracker et interrupt rotation dans un seul addon modulaire.
+## Notes: Boss timers, swing timer, alerte kick et alerte move (GTFO) dans un seul addon modulaire.
 ## Author: Dldvlpr
 ## Version: 0.1.0
 ## SavedVariables: MyBossSuiteDB
@@ -10,7 +10,7 @@
 # ATTENTION : fichier genere par tools/gen-toc.sh — ne pas editer a la main.
 #
 # L'ordre de load est le seul mecanisme de dependance qui existe :
-# Compat -> Scheduler -> EventBus -> DB -> Anchors -> Bars -> Config -> ModuleLoader -> Modules
+# Compat -> Scheduler -> EventBus -> DB -> Anchors -> Bars -> Alerts -> Config -> ModuleLoader -> Modules
 
 Core/Compat.lua
 Core/Scheduler.lua
@@ -18,11 +18,14 @@ Core/EventBus.lua
 Core/DB.lua
 Core/Anchors.lua
 Core/Bars.lua
+Core/Alerts.lua
 Core/Config.lua
 Core/ModuleLoader.lua
 
 Modules/SwingTimer/SwingTimer.lua
 Modules/BossTimer/BossTimer.lua
+Modules/InterruptAlert/InterruptAlert.lua
+Modules/MoveAlert/MoveAlert.lua
 
 # Data du flavor vanilla uniquement : aucune data morte chargee sur ce client.
 Modules/BossTimer/Data/vanilla/Onyxias_Lair/Onyxia.lua

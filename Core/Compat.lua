@@ -77,10 +77,12 @@ ns.version = (GetAddOnMetadata and GetAddOnMetadata(addonName, "Version")) or "d
 --------------------------------------------------------------------------------
 -- C_Spell.* introduit en 11.0 retail, backporte partiellement en classic.
 
+-- Retourne nil quand le sort est inconnu du client : c'est ce qui permet de
+-- distinguer "cooldown a zero" de "sort absent du grimoire".
 ns.GetSpellCooldown = (C_Spell and C_Spell.GetSpellCooldown)
     and function(id)
         local info = C_Spell.GetSpellCooldown(id)
-        if not info then return 0, 0, false end
+        if not info then return nil end
         return info.startTime, info.duration, info.isEnabled
     end
     or _G.GetSpellCooldown
@@ -100,6 +102,141 @@ ns.GetSpellTexture = (C_Spell and C_Spell.GetSpellTexture)
 function ns.GetSpellName(id)
     local name = ns.GetSpellInfo(id)
     return name
+end
+
+--- Le joueur connait-il ce sort ?
+-- `IsSpellKnown` teste un id exact : en classic, un sort a un id par rang et
+-- l'id du rang 1 ne dit rien du rang 6 appris. Le repli par nom couvre tous les
+-- rangs d'un coup, puisque le grimoire est indexe par nom.
+function ns.KnowsSpell(spellId)
+    if not spellId then return false end
+    if _G.IsPlayerSpell and IsPlayerSpell(spellId) then return true end
+    if _G.IsSpellKnown and IsSpellKnown(spellId) then return true end
+    local name = ns.GetSpellName(spellId)
+    if not name then return false end
+    return ns.GetSpellCooldown(name) ~= nil
+end
+
+--- Cooldown restant d'un sort, en secondes. 0 = pret.
+-- Le GCD (duree <= 1.5s) ne compte pas comme un cooldown : un kick reste
+-- annonce comme disponible pendant le GCD, sinon l'alerte clignote a chaque
+-- sort lance.
+function ns.GetSpellRemaining(spellId)
+    local start, duration = ns.GetSpellCooldown(spellId)
+    if not start then return nil end
+    if start == 0 or duration == 0 or duration <= 1.5 then return 0 end
+    local remaining = start + duration - GetTime()
+    return remaining > 0 and remaining or 0
+end
+
+--------------------------------------------------------------------------------
+-- Incantations
+--------------------------------------------------------------------------------
+-- Forme unique quelle que soit la version :
+--   name, icon, startMs, endMs, notInterruptible, spellId, isChannel
+-- `notInterruptible` n'existe pas sur les clients les plus anciens : l'absence
+-- de l'information se lit "interruptible", jamais "protege" — une alerte de
+-- trop vaut mieux qu'un kick manque.
+
+local UnitCastingInfo = _G.UnitCastingInfo
+local UnitChannelInfo = _G.UnitChannelInfo
+
+function ns.GetCastInfo(unit)
+    if UnitCastingInfo then
+        local name, _, texture, startTime, endTime, _, _, notInterruptible, spellId =
+            UnitCastingInfo(unit)
+        if name then
+            return name, texture, startTime, endTime, notInterruptible == true, spellId, false
+        end
+    end
+    if UnitChannelInfo then
+        -- Un channel n'a pas de castID : `notInterruptible` remonte d'un cran.
+        local name, _, texture, startTime, endTime, _, notInterruptible, spellId =
+            UnitChannelInfo(unit)
+        if name then
+            return name, texture, startTime, endTime, notInterruptible == true, spellId, true
+        end
+    end
+    return nil
+end
+
+--- Portee d'un sort sur une unite : 1 a portee, 0 hors de portee, nil quand le
+-- client ne sait pas repondre. C_Spell.IsSpellInRange (11.x) rend un booleen,
+-- l'ancienne API un entier : on garde la forme entiere partout.
+ns.IsSpellInRange = (C_Spell and C_Spell.IsSpellInRange)
+    and function(spell, unit)
+        local inRange = C_Spell.IsSpellInRange(spell, unit)
+        if inRange == nil then return nil end
+        return inRange and 1 or 0
+    end
+    or _G.IsSpellInRange
+
+--------------------------------------------------------------------------------
+-- Sons
+--------------------------------------------------------------------------------
+-- Deux mecanismes distincts : un id de SOUNDKIT (son du client) ou un chemin de
+-- fichier (son fourni par l'utilisateur). Les deux passent par pcall : un id
+-- absent d'un vieux client ou un fichier manquant ne doit jamais casser
+-- l'alerte visuelle qui l'accompagne.
+
+local PlaySound     = _G.PlaySound
+local PlaySoundFile = _G.PlaySoundFile
+
+-- Chaine de repli : le premier nom de SOUNDKIT qui existe sur ce client gagne.
+-- Les constantes varient d'une version a l'autre, la liste evite un `if
+-- isRetail` de plus.
+ns.SOUND_PRESETS = {
+    raidwarning = { "RAID_WARNING" },
+    readycheck  = { "READY_CHECK", "READY_CHECK_WARNING", "RAID_WARNING" },
+    alarm       = { "UI_RAID_BOSS_WHISPER_WARNING", "RAID_BOSS_EMOTE_WARNING", "RAID_WARNING" },
+    ping        = { "IG_MAINMENU_OPTION_CHECKBOX_ON", "IG_MAINMENU_OPEN" },
+    murloc      = { "MURLOC_AGGRO", "RAID_WARNING" },
+}
+
+function ns.ResolveSoundKit(name)
+    local kit = _G.SOUNDKIT
+    if not kit then return nil end
+    local candidates = ns.SOUND_PRESETS[name]
+    if candidates then
+        for i = 1, #candidates do
+            local id = kit[candidates[i]]
+            if id then return id end
+        end
+        return nil
+    end
+    return kit[name]
+end
+
+--- Joue un son decrit par une valeur de configuration :
+--   nombre        -> id de SOUNDKIT brut
+--   chemin        -> fichier (contient \ ou / ou finit par .ogg/.mp3/.wav)
+--   nom de preset -> ns.SOUND_PRESETS
+--   nom de kit    -> SOUNDKIT[nom]
+-- Retourne false si rien n'a pu etre joue, pour que l'appelant puisse le dire.
+function ns.PlayAlertSound(sound, channel)
+    if not sound then return false end
+    channel = channel or "Master"
+
+    if type(sound) == "number" then
+        if not PlaySound then return false end
+        return pcall(PlaySound, sound, channel) and true or false
+    end
+
+    if type(sound) ~= "string" then return false end
+
+    if sound:find("[\\/]") or sound:lower():find("%.%a%a%a?$") then
+        if not PlaySoundFile then return false end
+        return pcall(PlaySoundFile, sound, channel) and true or false
+    end
+
+    local kit = ns.ResolveSoundKit(sound)
+    if kit and PlaySound then
+        return pcall(PlaySound, kit, channel) and true or false
+    end
+
+    -- Tout premiers clients : PlaySound prenait un nom de son, pas un id.
+    if PlaySound then return pcall(PlaySound, sound, channel) and true or false end
+    return false
 end
 
 --------------------------------------------------------------------------------
@@ -262,6 +399,9 @@ ns.has = {
     specializations     = _G.GetSpecialization ~= nil,
     lossOfControl       = _G.C_LossOfControl ~= nil,
     namePlates          = _G.C_NamePlate ~= nil,
+    -- Sans UnitCastingInfo, l'incantation d'une cible ne se lit que dans le
+    -- combat log : le module interrupt bascule sur ce repli.
+    unitCastInfo        = _G.UnitCastingInfo ~= nil,
     nativeTimers        = hasNativeTimer,
     -- Le parry haste (swing en cours ampute) n'existe plus en retail.
     parryHaste          = not ns.isRetail,

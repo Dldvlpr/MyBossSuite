@@ -53,10 +53,13 @@ local FILES = {
     "Core/DB.lua",
     "Core/Anchors.lua",
     "Core/Bars.lua",
+    "Core/Alerts.lua",
     "Core/Config.lua",
     "Core/ModuleLoader.lua",
     "Modules/SwingTimer/SwingTimer.lua",
     "Modules/BossTimer/BossTimer.lua",
+    "Modules/InterruptAlert/InterruptAlert.lua",
+    "Modules/MoveAlert/MoveAlert.lua",
     "Modules/BossTimer/Data/vanilla/Onyxias_Lair/Onyxia.lua",
 }
 
@@ -137,6 +140,13 @@ equal(ns.db.modules.bossTimer.sound, true, "defaults specifiques du module")
 Mock.FireEvent("PLAYER_LOGIN")
 equal(ns:IsModuleEnabled("swingTimer"), true, "module actif au login")
 equal(ns:IsModuleEnabled("cdTracker"), false, "module desactive par defaut")
+equal(ns:IsModuleEnabled("interruptAlert"), true, "alerte kick active par defaut")
+equal(ns:IsModuleEnabled("moveAlert"), true, "alerte move active par defaut")
+
+-- Les deux modules d'alerte ecoutent le combat log : on les eteint pendant les
+-- suites qui le pilotent pour autre chose, chacun a la sienne plus bas.
+ns:SetModuleEnabled("interruptAlert", false)
+ns:SetModuleEnabled("moveAlert", false)
 
 --------------------------------------------------------------------------------
 
@@ -315,6 +325,196 @@ equal(leftovers, 0, "aucun timer du pull precedent ne survit")
 
 --------------------------------------------------------------------------------
 
+suite("Alertes")
+-- Le boss timer et le swing timer pilotent aussi le combat log : on les eteint
+-- pendant les trois suites d'alerte pour que chacune ne teste qu'elle-meme.
+ns:SetModuleEnabled("bossTimer", false)
+ns:SetModuleEnabled("swingTimer", false)
+
+ok(ns.Alerts:Get("kick") ~= nil, "alerte kick declaree")
+ok(ns.Alerts:Get("move") ~= nil, "alerte move declaree")
+ok(ns.Anchors.registry["InterruptAlert_Display"] ~= nil, "alerte kick deplacable")
+ok(ns.Anchors.registry["MoveAlert_Display"] ~= nil, "alerte move deplacable")
+
+local moveDisplay = ns.Alerts:Get("move").display
+
+Mock.sounds = {}
+ns.Alerts:Show("move", { subtitle = "zone" })
+ok(moveDisplay:IsShown(), "alerte affichee")
+equal(moveDisplay.text:GetText(), "MOVE", "texte par defaut du module")
+equal(#Mock.sounds, 1, "son joue avec l'alerte")
+Mock.Advance(3)
+equal(moveDisplay:IsShown(), false, "alerte masquee une fois sa duree ecoulee")
+
+ns.Alerts:Set("move", "sound", false)
+Mock.sounds = {}
+ns.Alerts:Show("move", {})
+equal(#Mock.sounds, 0, "son coupe : aucun son ne part")
+ok(moveDisplay:IsShown(), "... mais le visuel reste")
+ns.Alerts:Hide("move")
+
+ns.Alerts:Set("move", "sound", true)
+ns.Alerts:Set("move", "visual", false)
+Mock.sounds = {}
+ns.Alerts:Show("move", {})
+equal(moveDisplay:IsShown(), false, "visuel coupe : rien ne s'affiche")
+equal(#Mock.sounds, 1, "... mais le son part quand meme")
+
+ns.Alerts:Set("move", "visual", true)
+ns.Alerts:Set("move", "text", "BOUGE")
+ns.Alerts:Set("move", "fontSize", 60)
+ns.Alerts:Show("move", {})
+equal(moveDisplay.text:GetText(), "BOUGE", "texte personnalise")
+local _, appliedSize = moveDisplay.text:GetFont()
+equal(appliedSize, 60, "taille de police personnalisee")
+ns.Alerts:Hide("move")
+
+-- Le throttle se compte depuis le dernier son joue : on laisse passer le delai
+-- avant de le tester, sinon c'est l'alerte precedente qu'on mesure.
+Mock.Advance(1)
+Mock.sounds = {}
+ns.Alerts:Show("move", {})
+ns.Alerts:Show("move", {})
+equal(#Mock.sounds, 1, "throttle : deux alertes rapprochees, un seul son")
+ns.Alerts:Preview("move")
+equal(#Mock.sounds, 2, "l'apercu ignore le throttle")
+ns.Alerts:Hide("move")
+
+ns.Alerts:Reset("move")
+equal(ns.Alerts:GetConfig("move").text, "MOVE", "reset : retour aux valeurs du module")
+equal(ns.Alerts:GetConfig("move").fontSize, 54, "reset : taille remise par defaut")
+
+-- Le preset "alarm" du kick : premier SOUNDKIT existant de la chaine de repli.
+Mock.sounds = {}
+ns.Alerts:PlaySound("kick", true)
+equal(Mock.sounds[1].kit, retail and 42 or 1,
+    retail and "preset alarm : kit retail" or "preset alarm : repli sur RAID_WARNING")
+
+ns.Alerts:Set("kick", "soundName", "Interface\\AddOns\\Perso\\kick.ogg")
+Mock.sounds = {}
+ns.Alerts:PlaySound("kick", true)
+equal(Mock.sounds[1].file, "Interface\\AddOns\\Perso\\kick.ogg",
+    "un chemin de fichier est joue comme fichier")
+ns.Alerts:Reset("kick")
+
+--------------------------------------------------------------------------------
+
+suite("InterruptAlert")
+ns:SetModuleEnabled("interruptAlert", true)
+local kick = ns:GetModule("interruptAlert")
+local kickDisplay = ns.Alerts:Get("kick").display
+equal(kick.interruptSpell, 1766, "interrupt de la classe detecte dans le grimoire")
+
+Mock.units.target = { guid = BOSS_GUID, name = "Onyxia", health = 100, healthMax = 100 }
+Mock.FireEvent("PLAYER_TARGET_CHANGED")
+
+Mock.SetCast("target", 17086, true)
+Mock.FireEvent("UNIT_SPELLCAST_START", "target")
+equal(kickDisplay:IsShown(), false, "cast protege : aucune alerte")
+
+Mock.SetCast("target", 17086, false)
+Mock.FireEvent("UNIT_SPELLCAST_START", "target")
+ok(kickDisplay:IsShown(), "cast interruptible : alerte affichee")
+equal(kickDisplay.text:GetText(), "KICK", "texte KICK")
+equal(kickDisplay.subtitle:GetText(), "Flame Breath", "nom du sort incante affiche")
+
+Mock.Advance(3)
+ok(kickDisplay:IsShown(), "l'alerte reste tant que l'incantation dure")
+
+Mock.SetCast("target", nil)
+Mock.FireEvent("UNIT_SPELLCAST_STOP", "target")
+equal(kickDisplay:IsShown(), false, "alerte retiree a la fin de l'incantation")
+
+Mock.cooldowns[1766] = { start = Mock.now, duration = 15 }
+Mock.SetCast("target", 17086, false)
+Mock.FireEvent("UNIT_SPELLCAST_START", "target")
+equal(kickDisplay:IsShown(), false, "kick en cooldown : aucune alerte")
+
+-- Le cooldown se termine au milieu de l'incantation : c'est le ticker qui doit
+-- rattraper le coup, aucun event ne le signale.
+Mock.cooldowns[1766] = nil
+Mock.Advance(0.4)
+ok(kickDisplay:IsShown(), "alerte des que le kick revient, sans nouvel event")
+
+Mock.outOfRange = true
+Mock.Advance(0.4)
+equal(kickDisplay:IsShown(), false, "hors de portee : alerte retiree")
+Mock.outOfRange = false
+Mock.Advance(0.4)
+ok(kickDisplay:IsShown(), "de retour a portee : alerte de nouveau")
+
+-- Repli combat log, pour les clients ou UnitCastingInfo ne repond rien sur une
+-- unite hostile.
+Mock.SetCast("target", nil)
+Mock.FireEvent("UNIT_SPELLCAST_STOP", "target")
+equal(kickDisplay:IsShown(), false, "plus d'incantation, plus d'alerte")
+Mock.FireCombatLog("SPELL_CAST_START", BOSS_GUID, PLAYER_GUID, 18435, "Fireball Volley")
+ok(kickDisplay:IsShown(), "repli combat log : alerte sur SPELL_CAST_START")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 18435, "Fireball Volley")
+equal(kickDisplay:IsShown(), false, "repli combat log : alerte retiree au SUCCESS")
+
+-- Un cast d'une unite qui n'est ni la cible ni le focus ne doit rien declencher.
+Mock.FireCombatLog("SPELL_CAST_START", "Creature-0-1-2-3-99999-000009", PLAYER_GUID, 18435, "Autre")
+equal(kickDisplay:IsShown(), false, "incantation d'une autre unite : ignoree")
+
+ns:SetModuleEnabled("interruptAlert", false)
+equal(kickDisplay:IsShown(), false, "module eteint : alerte retiree")
+
+--------------------------------------------------------------------------------
+
+suite("MoveAlert")
+ns:SetModuleEnabled("moveAlert", true)
+local move = ns:GetModule("moveAlert")
+local moveConfig = move:GetConfig()
+wipe(moveConfig.spells)
+wipe(moveConfig.ignored)
+
+Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, PLAYER_GUID, 22271, "Fire Patch", 1, 20)
+ok(moveDisplay:IsShown(), "degats periodiques : alerte MOVE")
+ok(move:IsKnown(22271), "la zone est memorisee dans le profil")
+
+Mock.sounds = {}
+Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, PLAYER_GUID, 22271, "Fire Patch", 1, 20)
+equal(#Mock.sounds, 0, "tick suivant : throttle, pas de seconde alerte")
+Mock.Advance(3)
+
+-- Un DoT est une aura que tu portes : bouger n'y change rien.
+Mock.auras.player = { { spellId = 22272 } }
+Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, PLAYER_GUID, 22272, "Corruption", 1, 20)
+equal(moveDisplay:IsShown(), false, "DoT sur toi : aucune alerte")
+equal(move:IsKnown(22272), false, "... et rien de memorise")
+Mock.auras.player = nil
+
+Mock.FireCombatLog("SPELL_DAMAGE", BOSS_GUID, PLAYER_GUID, 22273, "Cleave", 1, 30)
+equal(moveDisplay:IsShown(), false, "degats directs inconnus : aucune alerte")
+moveConfig.spells[22273] = true
+Mock.FireCombatLog("SPELL_DAMAGE", BOSS_GUID, PLAYER_GUID, 22273, "Cleave", 1, 30)
+ok(moveDisplay:IsShown(), "degats directs d'un sort de la liste : alerte")
+Mock.Advance(3)
+
+Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, PLAYER_GUID, 22275, "Poussiere", 1, 1)
+equal(moveDisplay:IsShown(), false, "coup sous le seuil : ignore")
+
+move:Ignore(22271)
+Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, PLAYER_GUID, 22271, "Fire Patch", 1, 20)
+equal(moveDisplay:IsShown(), false, "sort ignore : plus aucune alerte")
+equal(move:IsKnown(22271), false, "ignorer un sort le retire de la liste")
+move:Unignore(22271)
+
+Mock.FireCombatLog("ENVIRONMENTAL_DAMAGE", nil, PLAYER_GUID, "Fire", 15)
+ok(moveDisplay:IsShown(), "degats d'environnement (feu) : alerte")
+Mock.Advance(3)
+
+-- Les degats subis par quelqu'un d'autre ne te concernent pas.
+Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, "Player-0-9999", 22276, "Zone", 1, 50)
+equal(moveDisplay:IsShown(), false, "degats sur un autre joueur : ignores")
+
+ns:SetModuleEnabled("moveAlert", false)
+ns:SetModuleEnabled("bossTimer", true)
+ns:SetModuleEnabled("swingTimer", true)
+
+--------------------------------------------------------------------------------
+
 suite("Mode test")
 ns.Config:StartTest()
 ok(ns.testMode, "mode test actif")
@@ -344,6 +544,38 @@ SlashCmdList["MYBOSSSUITE"]("lock")
 equal(ns.Anchors.unlocked, false, "/mbs lock")
 SlashCmdList["MYBOSSSUITE"]("profile list")
 ok(Mock.FindPrinted("Testeur-Mock"), "/mbs profile list")
+
+SlashCmdList["MYBOSSSUITE"]("alert")
+ok(Mock.FindPrinted("kick"), "/mbs alert liste les alertes")
+SlashCmdList["MYBOSSSUITE"]("alert move taille 66")
+equal(ns.Alerts:GetConfig("move").fontSize, 66, "/mbs alert <cle> taille")
+SlashCmdList["MYBOSSSUITE"]("alert move texte BOUGE DE LA")
+equal(ns.Alerts:GetConfig("move").text, "BOUGE DE LA", "/mbs alert <cle> texte (espaces conserves)")
+SlashCmdList["MYBOSSSUITE"]("alert move couleur 0.1 0.2 0.3")
+equal(ns.Alerts:GetConfig("move").color[2], 0.2, "/mbs alert <cle> couleur")
+SlashCmdList["MYBOSSSUITE"]("alert move son off")
+equal(ns.Alerts:GetConfig("move").sound, false, "/mbs alert <cle> son off")
+SlashCmdList["MYBOSSSUITE"]("alert move son alarm")
+equal(ns.Alerts:GetConfig("move").sound, true, "choisir un son rallume le son")
+equal(ns.Alerts:GetConfig("move").soundName, "alarm", "/mbs alert <cle> son <preset>")
+SlashCmdList["MYBOSSSUITE"]("alert move reset")
+equal(ns.Alerts:GetConfig("move").text, "MOVE", "/mbs alert <cle> reset")
+
+SlashCmdList["MYBOSSSUITE"]("move add 12345")
+ok(ns:GetModule("moveAlert"):IsKnown(12345), "/mbs move add")
+SlashCmdList["MYBOSSSUITE"]("move remove 12345")
+equal(ns:GetModule("moveAlert"):IsKnown(12345), false, "/mbs move remove")
+SlashCmdList["MYBOSSSUITE"]("move seuil 10")
+equal(ns:GetModule("moveAlert"):GetConfig().threshold, 0.1, "/mbs move seuil <pct>")
+SlashCmdList["MYBOSSSUITE"]("move seuil 2")
+
+SlashCmdList["MYBOSSSUITE"]("kick spell 2139")
+equal(ns:GetModule("interruptAlert").interruptSpell, 2139, "/mbs kick spell <id>")
+SlashCmdList["MYBOSSSUITE"]("kick spell auto")
+equal(ns:GetModule("interruptAlert").interruptSpell, 1766, "/mbs kick spell auto")
+SlashCmdList["MYBOSSSUITE"]("kick focus off")
+equal(ns:GetModule("interruptAlert"):GetConfig().watchFocus, false, "/mbs kick focus off")
+SlashCmdList["MYBOSSSUITE"]("kick focus on")
 
 --------------------------------------------------------------------------------
 

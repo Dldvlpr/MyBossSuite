@@ -25,6 +25,8 @@ local PROFILE_DEFAULTS = {
     modules = {
         bossTimer         = { enabled = true },
         swingTimer        = { enabled = true },
+        interruptAlert    = { enabled = true },
+        moveAlert         = { enabled = true },
         cdTracker         = { enabled = false },
         interruptRotation = { enabled = false },
     },
