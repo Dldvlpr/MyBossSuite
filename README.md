@@ -229,8 +229,20 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   cherche le boss sur `boss1..5`, puis le combat log l'identifie
   (`BOSS_IDENTIFIED`), pour que le swing timer se verrouille dessus quand même.
 * **Un cast observé prime sur une estimation.** Un `spellId` posé sur un timer
-  `PULL` sert de resynchronisation : quand le boss lance réellement le sort, la
-  prochaine occurrence est recalée dessus.
+  `PULL` (ou `PHASE`) sert de resynchronisation : quand le boss lance réellement
+  le sort, la prochaine occurrence est recalée dessus — **et le cast s'affiche
+  au moment où il tombe**, comme n'importe quel trigger `CAST`. Sans ça, un sort
+  sans `repeatInterval` mesuré n'avait aucun moyen de se faire voir. Une annonce
+  qui vient de partir sur l'estimation ne se répète pas : c'est le même
+  événement, vu deux fois.
+* **`variable` n'est pas une échéance, c'est une fenêtre.** Certains sorts sont
+  sur cooldown interne + choix aléatoire : ils sont *disponibles* à l'heure
+  mesurée, pas *lancés*. Un timer marqué `variable` (ce que pose `wcl-ingest`
+  quand l'écart-type est élevé) affiche donc sa barre grisée et préfixée `~`,
+  n'annonce **rien** quand l'estimation s'écoule — la barre reste à zéro,
+  chrono `?`, pré-alerte et compte à rebours muets —, et c'est le cast réel qui
+  déclenche l'annonce. Passé 15 s sans rien voir, le cycle d'estimation repart :
+  un sort jamais observé ne doit pas faire taire son timer pour de bon.
 * **Alerte kick : trois conditions, vérifiées en continu.** Cible (ou focus) en
   incantation, incantation non protégée, **et** ton interrupt réellement
   disponible et à portée. Un ticker de 0,15 s tourne pendant l'incantation, parce

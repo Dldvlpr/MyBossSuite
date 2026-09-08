@@ -353,7 +353,7 @@ ok(playerBar.endTime > mainHandEnd, "SWING_MISSED main droite : barre relancee")
 
 suite("BossTimer")
 local boss = ns:GetModule("bossTimer")
-equal(boss:CountData(), 5, "data chargee (Onyxia, Kazzak, Herod + 2 fixtures)")
+equal(boss:CountData(), 6, "data chargee (Onyxia, Kazzak, Herod + 3 fixtures)")
 equal(ns.BossTimerAlias[99002], 99001, "npcId secondaire aliase vers la rencontre")
 if retail then
     -- La data vanilla chargee sur un client retail doit etre signalee.
@@ -394,13 +394,17 @@ ns.EventBus:On("BOSS_PHASE_CHANGED", function(index, _, _, reason)
     phaseChanges[#phaseChanges + 1] = index .. ":" .. tostring(reason)
 end)
 
+-- Flame Breath est mesure `variable` : l'estimation ecoulee n'annonce rien,
+-- elle ouvre une fenetre. La barre reste, a zero, en attente du cast reel.
 Mock.Advance(12.5)
-equal(firedTimers[1], "Flame Breath", "timer PULL declenche a l'heure")
-equal(generic:GetBar("t1").duration, 25, "repeatInterval relance la barre")
+equal(CountFired("Flame Breath"), 0, "estimation incertaine : rien n'est annonce")
+ok(generic:GetBar("t1") ~= nil, "la barre d'un timer variable survit a son estimation")
+equal(generic:GetBar("t1").timeText:GetText(), "?", "chrono en attente du cast")
 
--- Un cast observe resynchronise la prochaine occurrence.
+-- Le cast, lui, s'affiche au moment ou le boss le fait.
 Mock.Advance(5)
 Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 17086)
+equal(firedTimers[1], "Flame Breath", "le cast observe declenche le timer")
 equal(generic:GetBar("t1"):GetRemaining(), 25, "resynchro sur le cast observe")
 
 -- Un timer reserve a la phase 2 ne reagit pas en phase 1.
@@ -498,6 +502,7 @@ equal(boss.engaged, 10184, "mort du joueur en groupe : le pull reste engage")
 ok(generic:GetBar("t1") ~= nil, "... et les barres survivent")
 local firedBefore = #firedTimers
 Mock.Advance(12.5)
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 17086)
 ok(#firedTimers > firedBefore, "les timers continuent de tirer pendant que le joueur est mort")
 Mock.units.party1.dead, Mock.units.party1.combat = true, false
 Mock.Advance(2.5)
@@ -747,6 +752,62 @@ if retail then
     Mock.FireEvent("ENCOUNTER_END", 4243, "Conseil des Tests", 1, 40, 1)
     equal(boss.engaged, nil, "fin de rencontre")
 end
+
+--------------------------------------------------------------------------------
+
+suite("BossTimer - casts imprevisibles")
+-- Certaines capacites ne tombent pas a heure fixe : la mesure ne dit que le
+-- moment ou elles redeviennent possibles. Le timer `variable` ouvre alors une
+-- fenetre au lieu d'annoncer une echeance, et c'est le cast observe qui parle.
+local IMPRV_GUID = "Creature-0-1-2-3-99200-000010"
+Mock.groupSize, Mock.inRaid = 5, false
+Mock.units.player.dead = false
+Mock.units.player.combat = true
+Mock.units.party1 = { guid = "Player-0-0002", name = "Tank", combat = true }
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", IMPRV_GUID, PLAYER_GUID, 12345)
+equal(boss.engaged, 99200, "boss engage")
+equal(generic:GetBar("t1").duration, 10, "estimation du timer variable affichee")
+equal(generic:GetBar("t1").label:GetText(), "~Coup de sang", "barre marquee incertaine")
+
+local firedBefore = #firedTimers
+Mock.printed = {}
+Mock.Advance(10.2)
+equal(CountFired("Coup de sang"), 0, "estimation ecoulee : le sort n'est pas annonce")
+equal(CountFired("Salve"), 0, "... pour tout timer variable")
+equal(CountFired("Certain"), 1, "un timing mesure sur, lui, tombe a l'heure")
+equal(bossDisplay.text:GetText(), "Certain", "et s'annonce")
+ok(generic:GetBar("t1") ~= nil, "la barre du timer variable reste, en attente")
+equal(generic:GetBar("t1").timeText:GetText(), "?", "chrono en attente")
+
+-- Un cast observe juste apres l'annonce de l'estimation ne se re-annonce pas :
+-- c'est le meme evenement, vu deux fois.
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", IMPRV_GUID, PLAYER_GUID, 99212)
+equal(CountFired("Certain"), 1, "pas de double annonce sur la resynchro")
+equal(generic:GetBar("t3"):GetRemaining(), 20, "... mais la barre se resynchronise")
+
+-- Rien de casté pendant la fenetre : le cycle d'estimation reprend, sans bruit.
+Mock.Advance(15.2)
+equal(CountFired("Salve"), 0, "fenetre passee sans cast : toujours rien d'annonce")
+equal(generic:GetBar("t2").duration, 20, "l'estimation repart")
+equal(generic:GetBar("t1"), nil, "un timer a coup unique laisse sa place")
+
+-- Le boss lance enfin son sort : c'est la, et seulement la, que ca s'affiche.
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", IMPRV_GUID, PLAYER_GUID, 99211)
+equal(CountFired("Salve"), 1, "le cast observe declenche le timer")
+equal(generic:GetBar("t2"):GetRemaining(), 20, "prochaine estimation calee sur le cast")
+
+-- Meme un timer a coup unique dont l'estimation est morte depuis longtemps
+-- s'affiche quand le boss le lance : c'est son seul moment.
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", IMPRV_GUID, PLAYER_GUID, 99210)
+equal(CountFired("Coup de sang"), 1, "cast tardif affiche quand meme")
+equal(bossDisplay.text:GetText(), "Coup de sang", "annonce du cast observe")
+ok(#firedTimers > firedBefore, "les observations passent bien par BOSS_TIMER_FIRED")
+
+boss:Disengage("manual")
+equal(boss.engaged, nil, "disengage")
+Mock.units.player.combat = false
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
 
 --------------------------------------------------------------------------------
 

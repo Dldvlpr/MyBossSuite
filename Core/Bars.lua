@@ -125,11 +125,13 @@ function GroupMixin:Release(bar)
     bar:ClearAllPoints()
     bar.id = nil
     bar.onExpire = nil
+    bar.expiredText = nil
     self.pool[#self.pool + 1] = bar
 end
 
 --- Demarre (ou redemarre) une barre identifiee par `id`.
--- opts : color = {r,g,b}, warnBefore, variable, onExpire, keepOnExpire
+-- opts : color = {r,g,b}, warnBefore, variable, onExpire, keepOnExpire,
+--        expiredText (ce qu'affiche le chrono d'une barre gardee a zero)
 function GroupMixin:StartBar(id, duration, text, icon, opts)
     opts = opts or {}
     if duration <= 0 then return nil end
@@ -150,6 +152,7 @@ function GroupMixin:StartBar(id, duration, text, icon, opts)
     bar.warned       = false
     bar.onExpire     = opts.onExpire
     bar.keepOnExpire = opts.keepOnExpire
+    bar.expiredText  = opts.expiredText
 
     -- Un timing incertain ne doit pas s'afficher comme un timing mesure.
     bar.label:SetText(bar.variable and ("~" .. bar.text) or bar.text)
@@ -249,7 +252,10 @@ function GroupMixin:OnUpdate()
             local callback, id = bar.onExpire, bar.id
             if bar.keepOnExpire then
                 bar.bar:SetValue(0)
-                bar.timeText:SetText("0.0")
+                -- Une barre gardee a zero n'attend pas forcement zero seconde :
+                -- une estimation ecoulee attend un evenement, pas la fin d'un
+                -- decompte. `expiredText` le dit a la place du chrono.
+                bar.timeText:SetText(bar.expiredText or "0.0")
             else
                 self:StopBar(id)
             end

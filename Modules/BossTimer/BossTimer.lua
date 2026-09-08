@@ -17,6 +17,15 @@
 --   * reset  : world boss qui n'a rien fait ni subi depuis un moment (evade) ;
 --   * zone   : changement de zone / reload.
 --
+-- Estimation contre observation : un timing mesure sur se programme et s'annonce
+-- a l'heure. Un timing marque `variable` ne le fait pas — le sort est disponible
+-- a cette heure-la, pas lance. Sa barre s'affiche incertaine, son estimation
+-- ecoulee n'annonce rien et ouvre une fenetre d'attente, et c'est le cast vu
+-- dans le combat log qui declenche l'annonce. Tout `spellId` pose sur un timer,
+-- quel que soit son trigger, sert donc a la fois de resynchronisation et
+-- d'affichage : un sort qui tombe a un moment imprevisible n'a que ce
+-- moment-la pour se faire voir.
+--
 -- Phases : declarees dans la data, declenchees par seuil de vie, sort, emote,
 -- aura, mort d'un add ou simple delai. Chaque timer peut etre restreint a une
 -- ou plusieurs phases ; changer de phase coupe les timers qui n'y ont pas leur
@@ -99,6 +108,17 @@ local VALID_KINDS = { raid = true, dungeon = true, world = true }
 local SYNC_PULL_TOLERANCE = 1.5
 local SYNC_REPLY_WINDOW   = 2
 local SYNC_REQUEST_THROTTLE = 5
+
+-- Un timer `variable` n'a pas d'echeance : la mesure dit *quand la capacite
+-- redevient possible*, pas quand elle tombe. L'estimation ecoulee ouvre donc
+-- une fenetre pendant laquelle la barre reste affichee a zero, en attente du
+-- cast reel. Passe ce delai sans rien voir, le cycle d'estimation reprend :
+-- sinon un sort jamais observe ferait taire son timer pour de bon.
+local PENDING_WINDOW = 15
+
+-- Un cast observe juste apres l'annonce de l'estimation ne se re-annonce pas :
+-- c'est le meme evenement, vu deux fois.
+local RESYNC_QUIET = 5
 
 local EMOTE_EVENTS = {
     "CHAT_MSG_RAID_BOSS_EMOTE",
@@ -370,8 +390,12 @@ function M:ShowBar(def, duration)
         color      = def.color or BAR_COLOR,
         warnBefore = def.warnBefore,
         -- Un timing mesure avec un fort ecart-type s'affiche comme incertain
-        -- plutot que de mentir sur une precision qu'on n'a pas.
-        variable   = def.variable,
+        -- plutot que de mentir sur une precision qu'on n'a pas. Et son
+        -- estimation ecoulee ne fait pas disparaitre la barre : la capacite est
+        -- disponible, le cast peut tomber a tout moment.
+        variable     = def.variable,
+        keepOnExpire = def.variable or nil,
+        expiredText  = def.variable and "?" or nil,
     })
 end
 
@@ -395,11 +419,49 @@ function M:CancelTimerDef(def)
     self:StopBar(def)
 end
 
+--- Fin de la fenetre d'attente d'un timer `variable` : le cast n'a pas ete vu.
+-- On ne l'annonce pas apres coup — on remet simplement le cycle d'estimation
+-- en route (ou on retire la barre d'un timer a coup unique).
+function M:EndPending(def)
+    if not def.pending then return end
+    def.pending = nil
+    if def.repeatInterval and not def.once then
+        self:ScheduleNext(def, def.repeatInterval)
+    else
+        self:CancelTimerDef(def)
+    end
+end
+
+--- L'estimation d'un timer `variable` est ecoulee : la capacite est disponible,
+-- mais rien n'a encore ete lance. On ne crie pas un evenement qui n'a pas eu
+-- lieu ; la barre reste a zero, marquee « ? », et c'est le cast observe qui
+-- parlera.
+function M:StartPending(def)
+    def.pending = true
+    def.dueAt   = nil
+    local prefix = TimerPrefix(def)
+    Scheduler:Cancel(prefix .. "fire")
+    Scheduler:Schedule(prefix .. "pending", def.pendingWindow or PENDING_WINDOW, function()
+        self:EndPending(def)
+    end)
+    EventBus:Fire("BOSS_TIMER_PENDING", def)
+end
+
 --- Le moment ou la capacite tombe : on annonce, puis on reprogramme si le timer
 -- se repete.
-function M:FireTimer(def, subtitle)
+-- `observed` : le cast a bien ete vu dans le combat log. Sans ca, c'est
+-- l'estimation qui arrive a echeance — et une estimation marquee `variable`
+-- n'est pas un evenement : elle ouvre une fenetre, elle ne la ferme pas.
+function M:FireTimer(def, subtitle, observed)
     if def.once and def.fired then return end
-    def.fired = true
+    if def.variable and not observed then
+        self:StartPending(def)
+        return
+    end
+    def.fired   = true
+    def.pending = nil
+    Scheduler:Cancel(TimerPrefix(def) .. "pending")
+    def.announcedAt = GetTime()
 
     EventBus:Fire("BOSS_TIMER_FIRED", def)
 
@@ -432,6 +494,7 @@ end
 --- Programme l'echeance, la pre-alerte et le compte a rebours d'un timer.
 function M:ScheduleNext(def, delay)
     self:CancelTimerSchedule(def)
+    def.pending = nil
     self:ShowBar(def, delay)
     def.dueAt = GetTime() + delay
 
@@ -441,6 +504,10 @@ function M:ScheduleNext(def, delay)
     end)
 
     local config = self:GetConfig() or EMPTY
+
+    -- Pre-alerte et compte a rebours annoncent une echeance. Sur un timing
+    -- incertain il n'y en a pas : la barre grisee suffit a dire « bientot ».
+    if def.variable then return end
 
     if def.announce and def.warnBefore and delay > def.warnBefore and config.announce ~= false then
         Scheduler:Schedule(prefix .. "warn", delay - def.warnBefore, function()
@@ -531,6 +598,8 @@ function M:BuildLookups(def, difficultyId)
         local timer = timers[i]
         timer.key     = timer.key or ("t" .. i)
         timer.fired   = false
+        timer.pending = nil
+        timer.announcedAt = nil
         timer.isPhase = nil
         timer.skipped = not AppliesToDifficulty(timer, difficultyId)
         if not timer.skipped then
@@ -676,16 +745,26 @@ function M:Trigger(entry, reason, subtitle)
     if not TimerInPhase(entry, self.phase or 1) then return false end
     if entry.trigger == "CAST" or entry.trigger == "AURA"
         or entry.trigger == "DEATH" or entry.trigger == "EMOTE" or entry.trigger == "HEALTH" then
-        self:FireTimer(entry, subtitle)
+        self:FireTimer(entry, subtitle, true)
         return true
     end
-    if entry.repeatInterval then
-        -- Timer PULL/PHASE avec spellId : resynchro sur l'observation.
-        entry.fired = true
-        self:ScheduleNext(entry, entry.repeatInterval)
+    -- Timer PULL/PHASE avec spellId : l'observation prime sur l'estimation.
+    -- Elle s'affiche comme n'importe quel autre cast — un sort qui tombe a un
+    -- moment imprevisible n'a que ce moment-la pour se faire voir — sauf si
+    -- l'estimation vient tout juste de l'annoncer, auquel cas on resynchronise
+    -- en silence.
+    if entry.announcedAt and (GetTime() - entry.announcedAt) < RESYNC_QUIET then
+        entry.fired   = true
+        entry.pending = nil
+        if entry.repeatInterval and not entry.once then
+            self:ScheduleNext(entry, entry.repeatInterval)
+        else
+            self:CancelTimerDef(entry)
+        end
         return true
     end
-    return false
+    self:FireTimer(entry, subtitle, true)
+    return true
 end
 
 --------------------------------------------------------------------------------

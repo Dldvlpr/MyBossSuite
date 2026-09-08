@@ -8,8 +8,10 @@ script produit donc la data de toutes les versions du jeu.
 Principe : pour N logs d'un meme boss, on releve pour chaque sort ennemi le
 delta entre le debut du combat et chaque cast, puis on prend la MEDIANE (robuste
 aux pulls rates et aux outliers). Si l'ecart-type des deltas est eleve, le timer
-est marque `variable = true` : la barre s'affichera comme incertaine plutot que
-de mentir sur une precision qu'on n'a pas.
+est marque `variable = true` : ce n'est plus une echeance, c'est le moment ou la
+capacite redevient possible. Le module l'affiche comme incertain, n'annonce rien
+a l'ecoulement de l'estimation (le sort est disponible, pas lance) et attend le
+cast reel — qui, lui, s'affiche quand le boss le fait.
 
 Un fichier de data n'est pas qu'un releve. La structure — phases, seuils de vie,
 libelles, `warnBefore` — s'ecrit a la main et ne se mesure pas. Une regeneration
@@ -632,7 +634,10 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
         "-- GENERE PAR tools/wcl-ingest/wcl_ingest.py — mediane des deltas mesures.",
         "-- Rencontre WCL : %s | logs retenus : %d" % (encounter_name or "?", used_reports),
         "-- Les timers marques `variable` ont un ecart-type eleve : mecanique non",
-        "-- deterministe, la barre s'affiche comme incertaine.",
+        "-- deterministe. Leur `time` n'est pas une echeance mais le moment ou la",
+        "-- capacite redevient possible : la barre s'affiche comme incertaine, elle",
+        "-- reste a zero sans rien annoncer une fois l'estimation ecoulee, et c'est le",
+        "-- cast observe dans le combat log qui declenche l'annonce.",
         "--",
         "-- Un timer PHASE compte depuis l'entree dans sa phase : il n'est mesure que",
         "-- si cette borne a pu etre situee dans le log (seuil de vie rejoue, cast",
