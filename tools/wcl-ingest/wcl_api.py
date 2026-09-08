@@ -548,6 +548,31 @@ def token_scopes(token: str) -> list:
     return list(scopes)
 
 
+REPORT_FIGHTS_QUERY = """
+query($code: String!) {
+  reportData {
+    report(code: $code) {
+      title
+      fights { id name encounterID startTime endTime kill }
+    }
+  }
+}
+"""
+
+
+def fetch_fights(token: str, code: str):
+    """Rend (titre, [combats]) — de quoi choisir un fightID sans quitter le terminal.
+
+    Le numero de combat ne se devine pas : il ne se lit ni dans le code du
+    rapport, ni dans l'URL quand elle dit `fight=last`. Le demander a
+    l'utilisateur sans lui donner le moyen de le trouver, c'est le renvoyer
+    fouiller l'interface web pour une valeur que l'API sait donner.
+    """
+    data = graphql(token, REPORT_FIGHTS_QUERY, {"code": code})
+    report = (data.get("reportData") or {}).get("report") or {}
+    return report.get("title") or "", report.get("fights") or []
+
+
 CURRENT_USER_QUERY = """
 query {
   userData {

@@ -71,6 +71,7 @@ from wcl_api import (  # noqa: E402
     fetch_events,
     fetch_current_user,
     fetch_fight,
+    fetch_fights,
     fetch_phase_transitions,
     load_credentials,
     parse_report_arg,
@@ -732,10 +733,13 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    # --whoami ne decrit aucune ingestion : lui imposer --npc-id, --boss et le
-    # reste en ferait un diagnostic qu'on ne peut pas lancer quand on en a
-    # justement besoin, c'est-a-dire avant de savoir quoi ingerer.
-    needed = "--whoami" not in (sys.argv[1:] if argv is None else argv)
+    # Les diagnostics ne decrivent aucune ingestion : leur imposer --npc-id,
+    # --boss et le reste en ferait des outils qu'on ne peut pas lancer quand on
+    # en a justement besoin, c'est-a-dire avant de savoir quoi ingerer. C'est
+    # meme le sens de --list-fights, qui sert a TROUVER un de ces arguments.
+    DIAGNOSTICS = ("--whoami", "--list-fights")
+    given = sys.argv[1:] if argv is None else argv
+    needed = not any(arg.split("=")[0] in DIAGNOSTICS for arg in given)
     parser.add_argument("--report", action="append", default=[], metavar="CODE:FIGHT",
                         help="log a analyser, repetable")
     parser.add_argument("--encounter", type=int, help="encounterID WCL (decouverte automatique des logs)")
@@ -767,6 +771,10 @@ def parse_args(argv=None):
                         help="port d'ecoute de la redirection OAuth (defaut %d). Doit "
                              "correspondre a la redirect URL enregistree sur le client API."
                              % DEFAULT_REDIRECT_PORT)
+    parser.add_argument("--list-fights", metavar="CODE",
+                        help="diagnostic : liste les combats du rapport CODE avec leur "
+                             "fightID, puis sort. C'est le nombre a mettre apres les "
+                             "deux-points dans --report CODE:FIGHT.")
     parser.add_argument("--whoami", action="store_true",
                         help="diagnostic : affiche le compte associe au jeton et sort. "
                              "Implique --user-auth. Un compte affiche prouve que "
@@ -823,8 +831,30 @@ def resolve_out(args) -> Path:
 def main(argv=None) -> int:
     args = parse_args(argv)
 
-    # Avant tout le reste : le diagnostic ne decrit aucune ingestion, il ne doit
-    # donc toucher ni au fichier de sortie ni aux arguments qui le nomment.
+    # Avant tout le reste : les diagnostics ne decrivent aucune ingestion, ils ne
+    # doivent toucher ni au fichier de sortie ni aux arguments qui le nomment.
+    if args.list_fights:
+        try:
+            client_id, client_secret = load_credentials()
+            token = authenticate(client_id, client_secret, args.user_auth, args.auth_port)
+            title, fights = fetch_fights(token, args.list_fights)
+        except WCLError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        if not fights:
+            print("aucun combat dans ce rapport.", file=sys.stderr)
+            return 2
+        print("%s — %d combat(s) :" % (title or args.list_fights, len(fights)))
+        for fight in fights:
+            duration = (float(fight.get("endTime") or 0) - float(fight.get("startTime") or 0)) / 1000.0
+            # L'encounterID separe un boss du trash : a 0, ce n'est pas une
+            # rencontre, et un fightID qui pointe la ne donnera jamais rien.
+            kind = "boss" if fight.get("encounterID") else "trash"
+            print("  --report %s:%-4s %-28s %-6s %5.0f s%s"
+                  % (args.list_fights, fight.get("id"), fight.get("name") or "?",
+                     kind, duration, "  (kill)" if fight.get("kill") else ""))
+        return 0
+
     if args.whoami:
         try:
             client_id, client_secret = load_credentials()
