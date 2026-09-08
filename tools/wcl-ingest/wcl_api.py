@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import pathlib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +25,99 @@ FLAVORS = ["vanilla", "tbc", "wrath", "cata", "mists", "retail"]
 
 class WCLError(RuntimeError):
     pass
+
+
+# ----------------------------------------------------------------------------
+# Identifiants
+# ----------------------------------------------------------------------------
+
+# Un secret n'a rien a faire dans le depot : il se lit dans l'environnement, ou
+# dans un `.env` non versionne. Le fichier est un CONFORT, pas une deuxieme
+# source de verite — l'environnement garde la priorite, pour qu'un `.env` oublie
+# ne prenne jamais le pas sur ce qu'un CI ou un shell a explicitement pose.
+CREDENTIAL_VARS = ("WCL_CLIENT_ID", "WCL_CLIENT_SECRET")
+
+# Cherche a cote du depot d'abord, puis dans le repertoire courant : lancer les
+# scripts depuis la racine est le cas nominal, mais on ne l'impose pas.
+DOTENV_DIRS = (
+    pathlib.Path(__file__).resolve().parents[2],
+    pathlib.Path.cwd(),
+)
+
+
+def parse_dotenv(text: str) -> dict:
+    """Lit un `.env` minimal : KEY=VALUE, un par ligne.
+
+    Volontairement pauvre — pas d'interpolation, pas de multi-ligne. Un `.env`
+    qui aurait besoin de plus serait un fichier de config, et un fichier de
+    config n'a pas sa place ici. `export ` en tete est tolere pour qu'un meme
+    fichier serve aussi a `source .env` sous bash.
+    """
+    values = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        # Les guillemets sont retires seulement s'ils encadrent la valeur : un
+        # secret peut legitimement contenir une quote au milieu.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def load_dotenv() -> dict:
+    """Fusionne les `.env` trouves. Un fichier illisible est ignore en silence.
+
+    Silencieux parce qu'un `.env` absent est le cas normal (l'environnement
+    suffit) : c'est `load_credentials` qui parle quand il manque vraiment
+    quelque chose, avec un message qui couvre les deux sources a la fois.
+    """
+    values = {}
+    seen = set()
+    for directory in DOTENV_DIRS:
+        path = (directory / ".env").resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        values.update(parse_dotenv(text))
+    return values
+
+
+def load_credentials() -> tuple:
+    """Rend (client_id, client_secret), ou leve WCLError en expliquant ou les mettre."""
+    found = {name: os.environ.get(name) or "" for name in CREDENTIAL_VARS}
+    if not all(found.values()):
+        from_file = load_dotenv()
+        for name in CREDENTIAL_VARS:
+            if not found[name]:
+                found[name] = (from_file.get(name) or "").strip()
+
+    missing = [name for name in CREDENTIAL_VARS if not found[name]]
+    if missing:
+        raise WCLError(
+            "%s manquant(s).\n"
+            "Cree un client API sur https://www.warcraftlogs.com/api/clients/, puis\n"
+            "soit un fichier `.env` a la racine du depot (non versionne) :\n"
+            "    WCL_CLIENT_ID=...\n"
+            "    WCL_CLIENT_SECRET=...\n"
+            "soit des variables d'environnement (bash : `export WCL_CLIENT_ID=...`,\n"
+            "PowerShell : `$env:WCL_CLIENT_ID = '...'`)."
+            % " / ".join(missing)
+        )
+    return found[CREDENTIAL_VARS[0]], found[CREDENTIAL_VARS[1]]
 
 
 # ----------------------------------------------------------------------------

@@ -20,10 +20,13 @@ passage jetterait le travail d'edition, et un boss a phases ne serait jamais
 regenerable. `--replace` force le comportement d'ecrasement.
 
 Pre-requis : un client API sur https://www.warcraftlogs.com/api/clients/ (OAuth,
-gratuit), puis :
+gratuit), puis un fichier `.env` a la racine du depot (voir `.env.example`) :
 
-    export WCL_CLIENT_ID=...
-    export WCL_CLIENT_SECRET=...
+    WCL_CLIENT_ID=...
+    WCL_CLIENT_SECRET=...
+
+Les variables d'environnement font aussi l'affaire et restent prioritaires
+(bash : `export WCL_CLIENT_ID=...` ; PowerShell : `$env:WCL_CLIENT_ID = '...'`).
 
 Exemples :
 
@@ -39,7 +42,6 @@ Exemples :
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import statistics
 import sys
@@ -62,6 +64,7 @@ from wcl_api import (  # noqa: E402
     fetch_fight,
     fetch_phase_transitions,
     get_token,
+    load_credentials,
     parse_report_arg,
 )
 
@@ -771,13 +774,8 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 2
 
-    client_id = os.environ.get("WCL_CLIENT_ID")
-    client_secret = os.environ.get("WCL_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        print("WCL_CLIENT_ID / WCL_CLIENT_SECRET manquants dans l'environnement.", file=sys.stderr)
-        return 2
-
     try:
+        client_id, client_secret = load_credentials()
         token = get_token(client_id, client_secret)
     except WCLError as exc:
         print(exc, file=sys.stderr)

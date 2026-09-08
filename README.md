@@ -391,7 +391,9 @@ Le `WeakAuras.lua` est dans
 `WTF/Account/<COMPTE>/SavedVariables/WeakAuras.lua`.
 
 * **`wcl-ingest`** — source principale de timings. OAuth client credentials
-  (`WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`), API GraphQL v2, médiane des deltas
+  (`WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`, à mettre dans un `.env` à la racine du
+  dépôt — copie `.env.example` ; le fichier est ignoré par git, et les variables
+  d'environnement restent prioritaires), API GraphQL v2, médiane des deltas
   depuis le pull, écart-type élevé ⇒ `variable = true` (barre affichée comme
   incertaine plutôt que faussement précise). Les timings mesurés sont des faits,
   pas une œuvre dérivée : aucune contrainte de licence.
