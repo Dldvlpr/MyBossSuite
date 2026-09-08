@@ -240,6 +240,7 @@ local HELP = {
     "  |cffffff00/mbs test stop|r — arrete le mode test",
     "  |cffffff00/mbs test boss <npcId>|r — rejoue la timeline d'un boss hors combat",
     "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume|sync on/off]",
+    "  |cffffff00/mbs anchor|r [<spellId>|remove <spellId>] — ancre dediee pour les barres d'un sort",
     "  |cffffff00/mbs list|r — etat des modules",
     "  |cffffff00/mbs enable|disable|toggle <module>|r",
     "  |cffffff00/mbs alert|r [kick|move] [texte|couleur|taille|duree|son|visuel|flash|test|reset]",
@@ -302,6 +303,51 @@ local function HandleTest(arg1, arg2)
         Config:ToggleTest()
     end
     Config:Refresh()
+end
+
+--------------------------------------------------------------------------------
+-- Ancres dediees par sort (/mbs anchor)
+--------------------------------------------------------------------------------
+-- Par defaut toutes les barres de boss s'empilent sur l'ancre generique. Un sort
+-- qu'on veut voir ailleurs (gros CD a placer pres du perso) recoit sa propre
+-- ancre, deplacable avec /mbs unlock comme le reste.
+
+local function HandleAnchor(arg1, arg2)
+    local module = ns:GetModule("bossTimer")
+    if not module then return end
+
+    local option = arg1 and arg1:lower()
+    if not option or option == "" or option == "list" then
+        local ids = module:ListOverrideAnchors()
+        ns.Print(("ancres dediees : %d"):format(#ids))
+        for i = 1, #ids do
+            print(("    %d — %s  |cffaaaaaaBossTimer_Alert_%d|r"):format(
+                ids[i], ns.GetSpellName(ids[i]) or "?", ids[i]))
+        end
+        print("  |cffaaaaaa/mbs anchor <spellId> pour en creer une, /mbs anchor remove <spellId> pour la retirer|r")
+        return
+    end
+
+    if option == "remove" or option == "del" or option == "supprimer" then
+        local spellId = tonumber((arg2 or ""):match("^%S+"))
+        if not spellId then return ns.Print("usage : /mbs anchor remove <spellId>") end
+        if module:RemoveOverrideAnchor(spellId) then
+            ns.Print(("ancre dediee retiree : %d — ses barres reviennent sur l'ancre generique."):format(spellId))
+        else
+            ns.Print(("aucune ancre dediee pour %d."):format(spellId))
+        end
+        return
+    end
+
+    local spellId = tonumber(option)
+    if not spellId then
+        return ns.Print("usage : /mbs anchor [list | <spellId> | remove <spellId>]")
+    end
+    local anchorKey = module:AddOverrideAnchor(spellId)
+    if anchorKey then
+        ns.Print(("ancre dediee creee pour %d (%s) : /mbs unlock pour la placer, /mbs test %s pour la voir.")
+            :format(spellId, ns.GetSpellName(spellId) or "?", anchorKey))
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -717,6 +763,8 @@ SlashCmdList["MYBOSSSUITE"] = function(input)
         ns:ToggleModule(arg1)
         ns.Print(("%s : %s"):format(arg1, ns:IsModuleEnabled(arg1) and "actif" or "inactif"))
         Config:Refresh()
+    elseif cmd == "anchor" or cmd == "ancre" then
+        HandleAnchor(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "alert" or cmd == "alerte" then
         HandleAlert(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "kick" then

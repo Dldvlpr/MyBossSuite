@@ -241,7 +241,7 @@ function M:OnEnvironmental(kind, amount)
 end
 
 local function OnCombatLog()
-    local _, sub, _, _, _, _, _, dstGUID, _, _, _, p12, p13, _, p15 =
+    local _, sub, _, _, _, _, _, dstGUID, _, _, _, p12, p13, _, p15, _, _, _, _, _, _, p22 =
         CombatLogGetCurrentEventInfo()
 
     if dstGUID ~= playerGUID then return end
@@ -251,6 +251,14 @@ local function OnCombatLog()
         M:OnDamage(p12, p13, p15, true)
     elseif DIRECT_DAMAGE[sub] then
         M:OnDamage(p12, p13, p15, false)
+    elseif sub == "SPELL_ABSORBED" then
+        -- Un coup entierement absorbe n'a pas de SPELL_DAMAGE : sans ce cas, un
+        -- joueur sous bouclier ne serait jamais alerte. Le log ne dit pas si
+        -- c'etait un tick periodique, donc pas d'heuristique : seules les zones
+        -- de la liste (ou de la data) alertent. Deux signatures : quand c'est
+        -- un sort qui est absorbe, p12 est son id et le montant est en 22e
+        -- position ; un coup blanc absorbe commence par le GUID de l'absorbeur.
+        if type(p12) == "number" then M:OnDamage(p12, p13, p22, false) end
     elseif sub == "ENVIRONMENTAL_DAMAGE" then
         -- Signature differente : pas de spellId, l'environnement prend sa place.
         M:OnEnvironmental(p12, p13)

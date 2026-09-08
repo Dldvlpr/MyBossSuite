@@ -116,6 +116,26 @@ Mock.units.player.combat = true
 equal(ns.IsGroupInCombat(), true, "joueur en combat")
 Mock.units.player.combat = false
 
+-- Incantations : meme forme de sortie quel que soit le nombre de valeurs
+-- rendues par le client. Classic Era n'a pas `notInterruptible`, et le spellId
+-- occupe alors la case du booleen.
+Mock.SetCast("target", 17086, true)
+local castName, _, _, _, castProtected, castSpell = ns.GetCastInfo("target")
+equal(castName, "Flame Breath", "GetCastInfo : nom")
+equal(castProtected, true, "GetCastInfo : cast protege")
+equal(castSpell, 17086, "GetCastInfo : spellId")
+Mock.legacyCastInfo = true
+castName, _, _, _, castProtected, castSpell = ns.GetCastInfo("target")
+equal(castProtected, false, "forme Classic Era : sans notInterruptible, lu interruptible")
+equal(castSpell, 17086, "forme Classic Era : spellId retrouve malgre le decalage")
+Mock.SetCast("target", 18435, false, true)
+local chanName, _, _, _, _, chanSpell, isChannel = ns.GetCastInfo("target")
+equal(chanName, "Fireball Volley", "GetCastInfo : channel")
+equal(chanSpell, 18435, "forme Classic Era : spellId d'un channel retrouve")
+equal(isChannel, true, "GetCastInfo : channel signale")
+Mock.legacyCastInfo = false
+Mock.SetCast("target", nil)
+
 --------------------------------------------------------------------------------
 
 suite("Scheduler")
@@ -141,6 +161,52 @@ ns.Scheduler:Cancel("tick")
 ok(ticks >= 3, "ticker repete (" .. ticks .. " ticks)")
 Mock.Advance(3)
 equal(ticks, ticks, "ticker annule ne tire plus")
+
+--------------------------------------------------------------------------------
+
+suite("EventBus")
+local calls = {}
+local function Broken() calls[#calls + 1] = "broken"; error("boom") end
+local function Healthy() calls[#calls + 1] = "healthy" end
+ns.EventBus:RegisterEvent("PLAYER_ALIVE", Broken)
+ns.EventBus:RegisterEvent("PLAYER_ALIVE", Healthy)
+Mock.printed = {}
+Mock.FireEvent("PLAYER_ALIVE")
+equal(#calls, 2, "une erreur dans un handler n'empeche pas le suivant")
+ok(Mock.FindPrinted("boom"), "l'erreur est signalee")
+Mock.printed = {}
+Mock.FireEvent("PLAYER_ALIVE")
+equal(Mock.FindPrinted("boom"), nil, "... une seule fois par minute, pas a chaque event")
+ns.EventBus:UnregisterEvent("PLAYER_ALIVE", Broken)
+
+-- Un handler qui se retire pendant le dispatch : la liste en cours ne bouge
+-- pas, les suivants tournent, et il ne tourne plus ensuite.
+local selfRemoving
+selfRemoving = function()
+    calls[#calls + 1] = "self"
+    ns.EventBus:UnregisterEvent("PLAYER_ALIVE", selfRemoving)
+end
+ns.EventBus:RegisterEvent("PLAYER_ALIVE", selfRemoving)
+local function Last() calls[#calls + 1] = "last" end
+ns.EventBus:RegisterEvent("PLAYER_ALIVE", Last)
+calls = {}
+Mock.FireEvent("PLAYER_ALIVE")
+equal(table.concat(calls, ","), "healthy,self,last",
+    "un handler qui se retire pendant le dispatch ne fait sauter personne")
+calls = {}
+Mock.FireEvent("PLAYER_ALIVE")
+equal(table.concat(calls, ","), "healthy,last", "... et ne tourne plus ensuite")
+ns.EventBus:UnregisterEvent("PLAYER_ALIVE", Healthy)
+ns.EventBus:UnregisterEvent("PLAYER_ALIVE", Last)
+equal(ns.EventBus.handlers["PLAYER_ALIVE"], nil, "event desinscrit quand plus personne n'ecoute")
+
+-- Memes garanties sur le bus interne.
+local got = 0
+ns.EventBus:On("MBS_TEST_MSG", function() error("boom interne") end)
+ns.EventBus:On("MBS_TEST_MSG", function() got = got + 1 end)
+Mock.printed = {}
+ns.EventBus:Fire("MBS_TEST_MSG")
+equal(got, 1, "message interne : une erreur n'empeche pas le listener suivant")
 
 --------------------------------------------------------------------------------
 
@@ -266,6 +332,21 @@ Mock.FireCombatLog("SWING_DAMAGE_LANDED", BOSS_GUID, PLAYER_GUID)
 equal(ns.Bars.groups["SwingTimer_TargetBar"]:GetBar("SwingTimer_TargetBar").endTime,
     beforeLanded, "SWING_DAMAGE_LANDED ignore")
 
+-- Main gauche : la barre suit la main droite, un coup de main gauche ne la
+-- relance pas (isOffHand = 21e argument de SWING_DAMAGE, 13e de SWING_MISSED).
+Mock.FireCombatLog("SWING_DAMAGE", PLAYER_GUID, BOSS_GUID,
+    100, 0, 1, 0, 0, 0, false, false, false, false)
+playerBar = ns.Bars.groups["SwingTimer_Bar"]:GetBar("SwingTimer_Bar")
+Mock.Advance(1)
+local mainHandEnd = playerBar.endTime
+Mock.FireCombatLog("SWING_DAMAGE", PLAYER_GUID, BOSS_GUID,
+    50, 0, 1, 0, 0, 0, false, false, false, true)
+equal(playerBar.endTime, mainHandEnd, "SWING_DAMAGE main gauche : barre main droite intacte")
+Mock.FireCombatLog("SWING_MISSED", PLAYER_GUID, BOSS_GUID, "DODGE", true)
+equal(playerBar.endTime, mainHandEnd, "SWING_MISSED main gauche : barre main droite intacte")
+Mock.FireCombatLog("SWING_MISSED", PLAYER_GUID, BOSS_GUID, "DODGE", false)
+ok(playerBar.endTime > mainHandEnd, "SWING_MISSED main droite : barre relancee")
+
 --------------------------------------------------------------------------------
 
 suite("BossTimer")
@@ -370,22 +451,23 @@ equal(boss.phase, 3, "un seuil deja franchi ne ramene pas en arriere")
 
 -- Sortir de combat n'est pas la fin du combat : c'est le groupe qui decide.
 Mock.printed = {}
+Mock.groupSize = 5
+Mock.units.party1 = { guid = "Player-0-0002", name = "Tank" }
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+Mock.Advance(1)
+equal(boss.engaged, 10184, "hors combat : toujours engage tant que le boss vient d'agir")
 if retail then
-    Mock.FireEvent("PLAYER_REGEN_ENABLED")
-    Mock.Advance(1)
-    equal(boss.engaged, 10184, "hors combat : toujours engage pendant le delai de grace")
     Mock.FireEvent("ENCOUNTER_END", 1084, "Onyxia", 1, 40, 1)
     equal(boss.engaged, nil, "disengage sur ENCOUNTER_END")
     ok(Mock.FindPrinted("kill"), "resume de kill imprime")
 else
-    Mock.FireEvent("PLAYER_REGEN_ENABLED")
-    Mock.Advance(1)
-    equal(boss.engaged, 10184, "hors combat : toujours engage pendant le delai de grace")
-    Mock.Advance(3)
-    equal(boss.engaged, nil, "wipe : plus personne en combat apres le delai de grace")
+    Mock.Advance(16)
+    equal(boss.engaged, nil, "wipe : personne en combat et boss muet")
     ok(Mock.FindPrinted("wipe"), "resume de wipe imprime")
     ok(Mock.FindPrinted("phase 3/3"), "resume : phase atteinte")
 end
+Mock.units.party1 = nil
+Mock.groupSize = 0
 equal(generic:Count(), 0, "barres nettoyees")
 equal(boss.phaseFrame:IsShown(), false, "cadre de phase masque")
 local leftovers = 0
@@ -393,6 +475,100 @@ for key in pairs(ns.Scheduler.active) do
     if key:sub(1, 10) == "BossTimer_" then leftovers = leftovers + 1 end
 end
 equal(leftovers, 0, "aucun timer du pull precedent ne survit")
+
+-- Sortie de combat du joueur != fin du combat.
+local function EngageOnyxia()
+    if retail then
+        Mock.FireEvent("ENCOUNTER_START", 1084, "Onyxia", 1, 40)
+    else
+        Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 12345)
+    end
+end
+Mock.units.target.health = 100
+Mock.groupSize, Mock.inRaid = 5, false
+Mock.units.party1 = { guid = "Player-0-0002", name = "Tank", combat = true }
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+EngageOnyxia()
+equal(boss.engaged, 10184, "re-engage pour le test de mort")
+Mock.units.player.dead = true
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+equal(boss.engaged, 10184, "mort du joueur en groupe : le pull reste engage")
+ok(generic:GetBar("t1") ~= nil, "... et les barres survivent")
+local firedBefore = #firedTimers
+Mock.Advance(12.5)
+ok(#firedTimers > firedBefore, "les timers continuent de tirer pendant que le joueur est mort")
+Mock.units.party1.dead, Mock.units.party1.combat = true, false
+Mock.Advance(2.5)
+equal(boss.engaged, nil, "wipe (plus personne de vivant) : disengage")
+equal(generic:Count(), 0, "wipe : barres nettoyees")
+
+-- Feign death / kite : le groupe se bat encore, on garde. Boss reset : plus
+-- personne en combat et boss muet, on lache apres delai.
+Mock.units.player.dead = nil
+Mock.units.party1 = { guid = "Player-0-0002", name = "Tank", combat = true }
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+EngageOnyxia()
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+equal(boss.engaged, 10184, "feign death : le pull reste engage tant que le groupe se bat")
+Mock.units.party1.combat = false
+Mock.Advance(4)
+equal(boss.engaged, 10184, "boss actif il y a peu : on ne conclut pas encore")
+Mock.Advance(14)
+equal(boss.engaged, nil, "boss muet depuis 15 s et personne en combat : reset detecte")
+
+-- De retour en combat : le check s'arrete, le pull tient jusqu'a la mort du boss.
+Mock.units.party1.combat = true
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+EngageOnyxia()
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+Mock.units.party1.combat = false
+Mock.Advance(20)
+equal(boss.engaged, 10184, "retour en combat : plus de check, le pull tient")
+Mock.FireCombatLog("UNIT_DIED", nil, BOSS_GUID)
+equal(boss.engaged, nil, "mort du boss : disengage immediat")
+
+-- Solo : sortir de combat, c'est la fin.
+Mock.groupSize = 0
+Mock.units.party1 = nil
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+EngageOnyxia()
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+equal(boss.engaged, nil, "solo : sortie de combat = disengage")
+
+if retail then
+    -- ENCOUNTER_START ne donne pas de GUID : les frames boss le fournissent...
+    Mock.units.target = nil
+    Mock.units.boss1 = { guid = BOSS_GUID, name = "Onyxia", health = 100, healthMax = 100 }
+    Mock.FireEvent("PLAYER_REGEN_DISABLED")
+    Mock.FireEvent("ENCOUNTER_START", 1084, "Onyxia", 1, 40)
+    equal(boss.bossGUID, BOSS_GUID, "ENCOUNTER_START : GUID resolu via boss1")
+    equal(swing.lockedToBoss, true, "le swing timer se verrouille sur le boss")
+    Mock.FireEvent("ENCOUNTER_END", 1084, "Onyxia", 1, 40, 0)
+    Mock.units.boss1 = nil
+    -- ... ou le combat log, apres coup.
+    Mock.FireEvent("ENCOUNTER_START", 1084, "Onyxia", 1, 40)
+    equal(boss.bossGUID, nil, "aucune unite visible : engage sans GUID")
+    equal(swing.lockedToBoss, false, "sans GUID, le swing timer ne se verrouille pas encore")
+    Mock.FireCombatLog("SWING_DAMAGE", BOSS_GUID, PLAYER_GUID, 100)
+    equal(boss.bossGUID, BOSS_GUID, "premier event du boss : GUID identifie")
+    equal(swing.lockedToBoss, true, "BOSS_IDENTIFIED : le swing timer se verrouille")
+    Mock.FireEvent("ENCOUNTER_END", 1084, "Onyxia", 1, 40, 0)
+    Mock.units.target = { guid = BOSS_GUID, name = "Onyxia", health = 100, healthMax = 100 }
+end
+
+-- Ancre dediee par sort : ses barres quittent l'ancre generique.
+SlashCmdList["MYBOSSSUITE"]("anchor 17086")
+ok(ns.db.anchors["BossTimer_Alert_17086"] ~= nil, "/mbs anchor <spellId> cree et sauvegarde l'ancre")
+equal(ns:ResolveAnchorKey(17086), "BossTimer_Alert_17086", "ResolveAnchorKey route vers l'ancre dediee")
+Mock.FireEvent("PLAYER_REGEN_DISABLED")
+EngageOnyxia()
+equal(generic:GetBar("t1"), nil, "la barre du sort n'est plus sur l'ancre generique")
+ok(ns.Bars.groups["BossTimer_Alert_17086"]:GetBar("t1") ~= nil, "... elle est sur l'ancre dediee")
+boss:Disengage()
+SlashCmdList["MYBOSSSUITE"]("anchor remove 17086")
+equal(ns:ResolveAnchorKey(17086), "BossTimer_GenericBar", "/mbs anchor remove : retour a l'ancre generique")
+equal(ns.Anchors.registry["BossTimer_Alert_17086"], nil, "ancre retiree du registre")
 
 --------------------------------------------------------------------------------
 
@@ -424,7 +600,17 @@ if retail then
     Mock.encounterInProgress = false
 end
 Mock.Advance(4)
-equal(boss.engaged, nil, "wipe : plus personne du groupe en combat")
+equal(boss.engaged, 99100, "personne en combat mais boss actif il y a peu : on attend")
+Mock.Advance(12)
+equal(boss.engaged, nil, "wipe : personne en combat et boss muet")
+-- Tout le monde mort : wipe sans attendre le silence du boss.
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", DUNGEON_GUID, PLAYER_GUID, 55555)
+Mock.units.player.dead, Mock.units.party1.dead = true, true
+Mock.FireEvent("PLAYER_REGEN_ENABLED")
+Mock.Advance(1.5)
+equal(boss.engaged, nil, "tout le monde mort : wipe immediat")
+Mock.units.player.dead, Mock.units.party1.dead = nil, nil
+Mock.units.party1.combat = true
 
 -- Retour en combat : le ticker de wipe s'arrete.
 Mock.FireCombatLog("SPELL_CAST_SUCCESS", DUNGEON_GUID, PLAYER_GUID, 55555)
@@ -442,7 +628,7 @@ Mock.FireEvent("ZONE_CHANGED_NEW_AREA")
 equal(boss.engaged, nil, "disengage sur changement de zone")
 
 Mock.units.party1 = nil
-Mock.groupSize = 1
+Mock.groupSize = 0
 Mock.instance = { name = "Azshara", type = "none", difficulty = 0, instanceId = 0 }
 
 --------------------------------------------------------------------------------
@@ -503,8 +689,8 @@ Mock.Advance(2)
 Mock.units.player.combat = false
 Mock.Advance(6)
 equal(boss.engaged, 99001, "retour en combat : le compteur repart")
-Mock.Advance(3)
-equal(boss.engaged, nil, "wipe world boss apres le delai de grace")
+Mock.Advance(6)
+equal(boss.engaged, nil, "wipe world boss : delai de grace passe et boss muet")
 
 -- Conseil : la rencontre ne finit qu'a la mort du dernier.
 Mock.printed = {}
@@ -662,7 +848,7 @@ equal(generic:GetBar("t1"):GetRemaining(), 7, "timer repetitif recale sur le bon
 boss:Disengage("manual")
 
 -- Solo : rien a envoyer, et rien ne casse.
-Mock.groupSize = 1
+Mock.groupSize = 0
 Mock.addonMessages = {}
 Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 12345)
 equal(boss.engaged, 10184, "engage solo")
@@ -689,7 +875,7 @@ equal(last and last.message, "1\tREQ", "demande d'etat a l'arrivee dans un group
 Mock.FireEvent("GROUP_ROSTER_UPDATE")
 Mock.Advance(1.5)
 equal(#Mock.addonMessages, 1, "demande d'etat limitee dans le temps")
-Mock.groupSize = 1
+Mock.groupSize = 0
 Mock.units.target = nil
 
 --------------------------------------------------------------------------------
@@ -825,6 +1011,18 @@ ok(kickDisplay:IsShown(), "repli combat log : alerte sur SPELL_CAST_START")
 Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 18435, "Fireball Volley")
 equal(kickDisplay:IsShown(), false, "repli combat log : alerte retiree au SUCCESS")
 
+-- Cast annule sans trace dans le combat log (stun, mort de la cible) :
+-- SPELL_CAST_FAILED n'est jamais logge pour un PNJ, seul le client le voit.
+Mock.SetCast("target", 18435, false)
+Mock.FireCombatLog("SPELL_CAST_START", BOSS_GUID, PLAYER_GUID, 18435, "Fireball Volley")
+Mock.FireEvent("UNIT_SPELLCAST_START", "target")
+ok(kickDisplay:IsShown(), "cast vu par l'API et par le combat log : alerte")
+Mock.SetCast("target", nil)
+Mock.FireEvent("UNIT_SPELLCAST_INTERRUPTED", "target")
+equal(kickDisplay:IsShown(), false, "cast annule cote client : pas d'incantation fantome via le repli")
+Mock.Advance(0.5)
+equal(kickDisplay:IsShown(), false, "... et le ticker ne la ressort pas")
+
 -- Un cast d'une unite qui n'est ni la cible ni le focus ne doit rien declencher.
 Mock.FireCombatLog("SPELL_CAST_START", "Creature-0-1-2-3-99999-000009", PLAYER_GUID, 18435, "Autre")
 equal(kickDisplay:IsShown(), false, "incantation d'une autre unite : ignoree")
@@ -885,6 +1083,19 @@ moveConfig.spells[22273] = true
 Mock.FireCombatLog("SPELL_DAMAGE", BOSS_GUID, PLAYER_GUID, 22273, "Cleave", 1, 30)
 ok(moveDisplay:IsShown(), "degats directs d'un sort de la liste : alerte")
 Mock.Advance(3)
+
+-- Coup entierement absorbe : SPELL_ABSORBED remplace SPELL_DAMAGE. Une zone de
+-- la liste alerte quand meme ; un sort inconnu n'a pas d'heuristique possible.
+Mock.FireCombatLog("SPELL_ABSORBED", BOSS_GUID, PLAYER_GUID, 22273, "Cleave", 1,
+    PLAYER_GUID, "Testeur", 0, 0, 17, "Power Word: Shield", 2, 30)
+ok(moveDisplay:IsShown(), "sort de la liste absorbe par un bouclier : alerte quand meme")
+Mock.Advance(3)
+Mock.FireCombatLog("SPELL_ABSORBED", BOSS_GUID, PLAYER_GUID, 22278, "Inconnu", 1,
+    PLAYER_GUID, "Testeur", 0, 0, 17, "Power Word: Shield", 2, 30)
+equal(moveDisplay:IsShown(), false, "sort inconnu absorbe : aucune alerte")
+Mock.FireCombatLog("SPELL_ABSORBED", BOSS_GUID, PLAYER_GUID,
+    PLAYER_GUID, "Testeur", 0, 0, 17, "Power Word: Shield", 2, 30)
+equal(moveDisplay:IsShown(), false, "coup blanc absorbe (signature sans sort) : ignore")
 
 Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, PLAYER_GUID, 22275, "Poussiere", 1, 1)
 equal(moveDisplay:IsShown(), false, "coup sous le seuil : ignore")
@@ -1021,6 +1232,26 @@ SlashCmdList["MYBOSSSUITE"]("kick data")
 ok(Mock.FindPrinted("Fireball Volley"), "/mbs kick data liste la data livree")
 SlashCmdList["MYBOSSSUITE"]("move data")
 ok(Mock.FindPrinted("Fire Wall"), "/mbs move data liste la data livree")
+
+--------------------------------------------------------------------------------
+
+suite("Profils")
+ns:SetModuleEnabled("interruptAlert", true)
+local raidProfile = ns.DB:EnsureProfile("raid")
+raidProfile.modules.interruptAlert.spellId = 2139
+raidProfile.locked = false
+SlashCmdList["MYBOSSSUITE"]("profile raid")
+equal(ns.DB:GetProfileName(), "raid", "/mbs profile <nom>")
+equal(ns:IsModuleEnabled("interruptAlert"), true, "module actif dans le nouveau profil")
+equal(ns:GetModule("interruptAlert").interruptSpell, 2139,
+    "changement de profil : le module actif relit sa config (interrupt force)")
+equal(ns.Anchors.unlocked, true, "changement de profil : l'etat unlock du profil est applique")
+SlashCmdList["MYBOSSSUITE"]("profile Testeur-Mock")
+equal(ns:GetModule("interruptAlert").interruptSpell, 1766, "retour au profil initial : interrupt auto")
+equal(ns.Anchors.unlocked, false, "retour au profil initial : ancres verrouillees")
+equal(ns.db.modules.interruptAlert.enabled, true,
+    "le redemarrage n'a rien ecrit dans le profil")
+ns:SetModuleEnabled("interruptAlert", false)
 
 --------------------------------------------------------------------------------
 

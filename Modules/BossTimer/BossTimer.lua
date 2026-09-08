@@ -79,11 +79,17 @@ local WIPE_POLL_INTERVAL   = 1
 -- boss : on peut en sortir (mort, fuite) pendant qu'il reste engage.
 local WIPE_GRACE = { raid = 3, dungeon = 3, world = 8 }
 
--- Inactivite du boss (rien lance, rien subi) avant de conclure a un reset. Ne
--- s'applique par defaut qu'aux world boss : en raid, une phase de transition
--- (boss submerge, invulnerable) peut durer bien plus longtemps.
+-- Des vivants mais personne en combat : boss reset, ou tout le monde a fui. On
+-- laisse au boss le temps de se taire (rien lance, rien subi) avant de conclure.
+local BOSS_IDLE_TIMEOUT = 15
+
+-- Inactivite du boss meme sans sortie de combat du joueur : reset d'un world
+-- boss (evade) pendant qu'on reste en combat avec ses adds. En raid, une phase
+-- de transition (boss submerge, invulnerable) peut durer bien plus longtemps.
 local INACTIVITY = { world = 45 }
 local WATCHDOG_INTERVAL = 5
+
+local UnitIsDeadOrGhost = _G.UnitIsDeadOrGhost
 
 local VALID_KINDS = { raid = true, dungeon = true, world = true }
 
@@ -178,6 +184,44 @@ function M:CreateSavedOverrideGroups()
             self:GetGroup(anchorKey)
         end
     end
+end
+
+--- Ancre dediee a un sort : ses barres quittent l'ancre generique pour une
+-- frame a part, deplacable en mode unlock. C'est ce que ns:ResolveAnchorKey
+-- consulte ; sans cette commande la mecanique n'etait atteignable nulle part.
+function M:AddOverrideAnchor(spellId)
+    if not ns.db or not spellId then return nil end
+    local anchorKey = "BossTimer_Alert_" .. spellId
+    local group = self:GetGroup(anchorKey)
+    if not ns.db.anchors[anchorKey] then group:SaveAnchor() end
+    return anchorKey, group
+end
+
+function M:RemoveOverrideAnchor(spellId)
+    if not ns.db or not spellId then return false end
+    local anchorKey = "BossTimer_Alert_" .. spellId
+    if not ns.db.anchors[anchorKey] then return false end
+    ns.db.anchors[anchorKey] = nil
+    local group = Bars.groups[anchorKey]
+    if group then
+        group:StopAll()
+        ns.Anchors:Unregister(anchorKey)
+        group:Hide()
+        -- Une frame ne se detruit pas : on la laisse orpheline et cachee.
+        Bars.groups[anchorKey] = nil
+    end
+    return true
+end
+
+function M:ListOverrideAnchors()
+    local out = {}
+    if not ns.db then return out end
+    for anchorKey in pairs(ns.db.anchors) do
+        local spellId = anchorKey:match("^BossTimer_Alert_(%d+)$")
+        if spellId then out[#out + 1] = tonumber(spellId) end
+    end
+    table.sort(out)
+    return out
 end
 
 function M:ClearBars()
@@ -373,8 +417,9 @@ function M:FireTimer(def, subtitle)
             color    = def.color,
             quiet    = not def.flash,
         })
-    elseif config and config.sound and _G.PlaySound and _G.SOUNDKIT then
-        PlaySound(SOUNDKIT.RAID_WARNING, "Master")
+    elseif config and config.sound then
+        -- Par Compat, comme tout son de l'addon : un kit absent ne casse rien.
+        ns.PlayAlertSound("raidwarning", "Master")
     end
 
     if def.repeatInterval and not def.once then
@@ -979,18 +1024,54 @@ function M:OnBossUnitDied(npcId)
     end
 end
 
---- Le client dit que la rencontre continue, ou quelqu'un du groupe se bat
--- encore : ce n'est pas un wipe.
-function M:IsFightOngoing()
-    if ns.IsEncounterInProgress and self.kind ~= "world" then
-        if ns.IsEncounterInProgress() then return true end
+--- Etat du groupe, joueur compris : (quelqu'un de vivant, quelqu'un en combat).
+local function GroupState()
+    local anyAlive, anyFighting = false, false
+    local function Look(unit)
+        if not UnitExists(unit) then return end
+        if UnitIsDeadOrGhost and UnitIsDeadOrGhost(unit) then return end
+        anyAlive = true
+        if ns.UnitAffectingCombat(unit) then anyFighting = true end
     end
-    return ns.IsGroupInCombat()
+    Look("player")
+    local prefix, count = ns.GroupUnitPrefix()
+    for i = 1, count do
+        if prefix .. i ~= "player" then Look(prefix .. i) end
+    end
+    return anyAlive, anyFighting
+end
+
+--- Le combat est-il vraiment termine ? Appele quand le joueur sort de combat,
+-- puis toutes les WIPE_POLL_INTERVAL secondes tant que la reponse est non.
+--   * solo hors world boss : sortir de combat, c'est la fin ;
+--   * le client dit que la rencontre continue : non ;
+--   * plus personne de vivant : wipe ;
+--   * quelqu'un se bat encore : non (mort, feign death, le raid continue) ;
+--   * des vivants mais personne en combat : boss reset ou tout le monde a fui,
+--     on attend que le boss se taise, et le delai de grace.
+function M:IsFightOver()
+    local now = GetTime()
+    if ns.GetNumGroupMembers() <= 1 and self.kind ~= "world" then return true end
+    if ns.IsEncounterInProgress and self.kind ~= "world" and ns.IsEncounterInProgress() then
+        return false
+    end
+    local anyAlive, anyFighting = GroupState()
+    if not anyAlive then return true end
+    if anyFighting then return false end
+    local grace = self.def.wipeGrace or WIPE_GRACE[self.kind] or WIPE_GRACE.raid
+    if now - (self.wipeSince or now) < grace then return false end
+    return now - self.lastActivity >= (self.def.idleTimeout or BOSS_IDLE_TIMEOUT)
+end
+
+function M:IsFightOngoing()
+    return not self:IsFightOver()
 end
 
 function M:StartWipeCheck()
     if not self.engaged then return end
     self.wipeSince = GetTime()
+    self:CheckWipe()
+    if not self.engaged then return end
     self:Repeat("wipeCheck", WIPE_POLL_INTERVAL, function() self:CheckWipe() end)
 end
 
@@ -1003,13 +1084,11 @@ end
 -- finit par wiper ne recevra plus aucun event, seul ce ticker peut le voir.
 function M:CheckWipe()
     if not self.engaged then return self:StopWipeCheck() end
-    if self:IsFightOngoing() then
-        self.wipeSince = GetTime()
-        return
-    end
-    local grace = self.def.wipeGrace or WIPE_GRACE[self.kind] or WIPE_GRACE.raid
-    if GetTime() - (self.wipeSince or 0) >= grace then
+    if self:IsFightOver() then
         self:Disengage("wipe")
+    elseif ns.IsGroupInCombat() then
+        -- Quelqu'un se bat : le delai de grace repart de la prochaine accalmie.
+        self.wipeSince = GetTime()
     end
 end
 
@@ -1024,10 +1103,44 @@ end
 -- Events
 --------------------------------------------------------------------------------
 
+--- GUID d'une unite visible dont le npcId appartient a la rencontre : frames
+-- boss en Cata+/retail, cible/focus/mouseover ailleurs. nil si rien n'est
+-- visible.
+function M:FindBossGUID(npcId)
+    local primary = BossTimerAlias[npcId] or npcId
+    local function Matches(unit)
+        if not UnitExists(unit) then return nil end
+        local guid = UnitGUID(unit)
+        local id = ns.NpcIdFromGUID(guid)
+        if id and BossTimerAlias[id] == primary then return guid end
+        return nil
+    end
+    if ns.has.bossUnitFrames then
+        for i = 1, 5 do
+            local guid = Matches("boss" .. i)
+            if guid then return guid end
+        end
+    end
+    for _, unit in ipairs({ "target", "focus", "mouseover" }) do
+        local guid = Matches(unit)
+        if guid then return guid end
+    end
+    return nil
+end
+
+--- Le boss s'est revele (combat log, frame boss) apres un engage sans GUID.
+function M:IdentifyBoss(guid)
+    if not guid or self.bossGUID then return end
+    self.bossGUID = guid
+    EventBus:Fire("BOSS_IDENTIFIED", self.engaged, guid)
+end
+
 function M:ENCOUNTER_START(_, encounterId, encounterName)
     local npcId = BossTimerEncounter[tonumber(encounterId) or -1]
     if npcId then
-        self:Engage(npcId, nil)
+        -- ENCOUNTER_START ne livre pas de GUID : on le cherche sur les frames
+        -- boss tout de suite, le combat log le fournira sinon (BOSS_IDENTIFIED).
+        self:Engage(npcId, self:FindBossGUID(npcId))
     else
         self:EngageGeneric(encounterId, encounterName)
     end
@@ -1130,8 +1243,12 @@ local function OnCombatLog()
     local _, sub, _, srcGUID, _, _, _, dstGUID, dstName, _, _, spellId = CombatLogGetCurrentEventInfo()
 
     if M.engaged and not M.generic then
-        -- World boss : tout ce qu'il fait ou subit prouve qu'il est encore la.
-        if M.inactivity and (IsBossGUID(srcGUID) or IsBossGUID(dstGUID)) then
+        -- Tout ce que le boss fait ou subit prouve qu'il est encore la : c'est
+        -- ce qui permet de conclure a un reset quand plus personne ne se bat.
+        if IsBossGUID(srcGUID) then
+            M.lastActivity = GetTime()
+            if not M.bossGUID then M:IdentifyBoss(srcGUID) end
+        elseif IsBossGUID(dstGUID) then
             M.lastActivity = GetTime()
         end
 
@@ -1152,7 +1269,6 @@ local function OnCombatLog()
 
         if sub == "SPELL_CAST_START" or sub == "SPELL_CAST_SUCCESS" then
             if not IsBossGUID(srcGUID) then return end
-            if not M.bossGUID then M.bossGUID = srcGUID end
             local list = M.castTriggers[spellId]
             if list then M:OnBossCast(list, sub) end
             return
@@ -1599,6 +1715,9 @@ end
 function M:OnEnable()
     playerGUID = UnitGUID("player")
     self:BuildAliases()
+    -- Les ancres dediees du profil courant (un changement de profil redemarre
+    -- le module sans repasser par OnInitialize).
+    self:CreateSavedOverrideGroups()
 
     if ns.has.encounterEvents then
         self:RegisterEvent("ENCOUNTER_START")
