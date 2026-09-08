@@ -397,6 +397,11 @@ Le `WeakAuras.lua` est dans
 > il contient un *refresh token*). Cela demande **un compte abonné** (palier Or
 > ou plus) et une redirect URL enregistrée valant exactement
 > `http://localhost:4480/callback` (modifiable via `--auth-port`).
+> L'autorisation demande les scopes `view-user-profile` et
+> `view-private-reports` : sans le second, le jeton est valide mais le contenu
+> des rapports reste refusé, sans erreur qui le dise. `--whoami` affiche le
+> compte associé au jeton et sépare les deux causes possibles d'un refus
+> (scopes manquants ou abonnement non pris en compte).
 > Quand c'est possible, viser une partition récente avec `--partition` reste
 > préférable : pas d'abonnement, et des timings mesurés sur le contenu tel
 > qu'il tourne aujourd'hui.

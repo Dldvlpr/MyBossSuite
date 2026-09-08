@@ -63,10 +63,13 @@ import wcl_phases  # noqa: E402
 from wcl_api import (  # noqa: E402
     DEFAULT_REDIRECT_PORT,
     FLAVORS,
+    SCOPES,
+    TOKEN_CACHE_NAME,
     WCLError,
     authenticate,
     discover_reports,
     fetch_events,
+    fetch_current_user,
     fetch_fight,
     fetch_phase_transitions,
     load_credentials,
@@ -688,17 +691,21 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # --whoami ne decrit aucune ingestion : lui imposer --npc-id, --boss et le
+    # reste en ferait un diagnostic qu'on ne peut pas lancer quand on en a
+    # justement besoin, c'est-a-dire avant de savoir quoi ingerer.
+    needed = "--whoami" not in (sys.argv[1:] if argv is None else argv)
     parser.add_argument("--report", action="append", default=[], metavar="CODE:FIGHT",
                         help="log a analyser, repetable")
     parser.add_argument("--encounter", type=int, help="encounterID WCL (decouverte automatique des logs)")
     parser.add_argument("--partition", type=int, help="partition WCL (une par version/saison)")
-    parser.add_argument("--npc-id", type=int, required=True, help="npcId du boss, cle du fichier de data")
-    parser.add_argument("--flavor", required=True, choices=FLAVORS)
-    parser.add_argument("--raid", required=True, help="dossier de zone (raid, donjon ou zone de monde), ex. Onyxias_Lair")
+    parser.add_argument("--npc-id", type=int, required=needed, help="npcId du boss, cle du fichier de data")
+    parser.add_argument("--flavor", required=needed, choices=FLAVORS)
+    parser.add_argument("--raid", required=needed, help="dossier de zone (raid, donjon ou zone de monde), ex. Onyxias_Lair")
     parser.add_argument("--kind", default="raid", choices=["raid", "dungeon", "world"],
                         help="nature de la rencontre : raid (defaut), dungeon ou world (world boss)")
     parser.add_argument("--zone", help="nom de zone affiche par /mbs boss list")
-    parser.add_argument("--boss", required=True, help="nom du boss (affichage + nom de fichier)")
+    parser.add_argument("--boss", required=needed, help="nom du boss (affichage + nom de fichier)")
     parser.add_argument("--limit", type=int, default=10, help="nombre de logs (defaut 10)")
     parser.add_argument("--min-reports", type=int, default=2,
                         help="nombre minimum de logs ou un sort doit apparaitre (defaut 2)")
@@ -719,6 +726,11 @@ def parse_args(argv=None):
                         help="port d'ecoute de la redirection OAuth (defaut %d). Doit "
                              "correspondre a la redirect URL enregistree sur le client API."
                              % DEFAULT_REDIRECT_PORT)
+    parser.add_argument("--whoami", action="store_true",
+                        help="diagnostic : affiche le compte associe au jeton et sort. "
+                             "Implique --user-auth. Un compte affiche prouve que "
+                             "l'autorisation porte bien les scopes ; si les archives "
+                             "restent refusees ensuite, c'est l'abonnement qui est en cause.")
     parser.add_argument("--dry-run", action="store_true", help="affiche les stats sans ecrire de fichier")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -769,6 +781,25 @@ def resolve_out(args) -> Path:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    # Avant tout le reste : le diagnostic ne decrit aucune ingestion, il ne doit
+    # donc toucher ni au fichier de sortie ni aux arguments qui le nomment.
+    if args.whoami:
+        try:
+            client_id, client_secret = load_credentials()
+            token = authenticate(client_id, client_secret, True, args.auth_port)
+            user = fetch_current_user(token)
+        except WCLError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        if not user:
+            print("Le jeton ne represente aucun compte : l'autorisation n'a pas "
+                  "accorde les scopes attendus (%s). Supprime %s et recommence."
+                  % (" ".join(SCOPES), TOKEN_CACHE_NAME), file=sys.stderr)
+            return 2
+        print("compte : %s (id %s)" % (user.get("name", "?"), user.get("id", "?")))
+        return 0
+
     out = resolve_out(args)
 
     # Relu avant le moindre appel API : un fichier qu'on ne sait pas relire doit

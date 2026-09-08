@@ -42,6 +42,14 @@ ACTIVE_API_URL = API_URL
 DEFAULT_REDIRECT_PORT = 4480
 REDIRECT_PATH = "/callback"
 
+# Sans scope demande, l'autorisation aboutit quand meme et rend un jeton
+# parfaitement valide — qui se fait ensuite refuser le CONTENU des rapports,
+# sans 401 ni rien qui pointe vers la cause. `view-private-reports` est celui
+# qui compte ici ; `view-user-profile` l'accompagne pour pouvoir interroger le
+# compte (cf. --whoami, seul moyen de distinguer un scope manquant d'un
+# abonnement non pris en compte).
+SCOPES = ("view-user-profile", "view-private-reports")
+
 FLAVORS = ["vanilla", "tbc", "wrath", "cata", "mists", "retail"]
 
 
@@ -196,6 +204,11 @@ def load_cached_token(now=None) -> str:
     expires_at = data.get("expires_at") or 0
     if not isinstance(expires_at, (int, float)):
         return ""
+    # Un jeton obtenu avec moins de scopes que ceux demandes aujourd'hui est
+    # inutilisable : il vaut mieux redemander une autorisation que rejouer en
+    # boucle un jeton qui se fera refuser le contenu.
+    if sorted(data.get("scopes") or []) != sorted(SCOPES):
+        return ""
     if token and expires_at - TOKEN_EXPIRY_MARGIN > now:
         return token
     return ""
@@ -206,7 +219,11 @@ def load_refresh_token() -> str:
         data = json.loads(token_cache_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
-    return (data.get("refresh_token") or "") if isinstance(data, dict) else ""
+    if not isinstance(data, dict):
+        return ""
+    if sorted(data.get("scopes") or []) != sorted(SCOPES):
+        return ""  # rafraichir ne rendrait qu'un jeton aux memes scopes insuffisants
+    return data.get("refresh_token") or ""
 
 
 def save_cached_token(payload: dict, now=None) -> None:
@@ -221,6 +238,10 @@ def save_cached_token(payload: dict, now=None) -> None:
         "access_token": payload.get("access_token", ""),
         "refresh_token": payload.get("refresh_token", ""),
         "expires_at": now + float(payload.get("expires_in") or 0),
+        # WCL ne renvoie pas les scopes accordes (`scope` est null) : on note
+        # ceux qu'on a DEMANDES, ce qui suffit a detecter un cache perime par
+        # un changement de cette liste.
+        "scopes": list(SCOPES),
     }
     path = token_cache_path()
     try:
@@ -258,6 +279,7 @@ def build_authorize_url(client_id: str, port: int, state: str) -> str:
         "redirect_uri": redirect_uri(port),
         "response_type": "code",
         "state": state,
+        "scope": " ".join(SCOPES),
     })
     return "%s?%s" % (AUTHORIZE_URL, query)
 
@@ -501,6 +523,27 @@ query($code: String!, $fight: Int!) {
   }
 }
 """
+
+
+CURRENT_USER_QUERY = """
+query {
+  userData {
+    currentUser { id name }
+  }
+}
+"""
+
+
+def fetch_current_user(token: str) -> dict:
+    """Rend le compte associe au jeton. Diagnostic, pas ingestion.
+
+    Utile parce que deux causes tres differentes donnent la meme erreur sur les
+    archives : un scope manquant (le jeton ne represente personne) et un
+    abonnement non pris en compte (il represente bien le compte, mais le compte
+    n'a pas le droit). Cette requete les separe.
+    """
+    data = graphql(token, CURRENT_USER_QUERY, {})
+    return (data.get("userData") or {}).get("currentUser") or {}
 
 
 def discover_reports(token: str, encounter_id: int, limit: int, partition: int | None):

@@ -56,6 +56,9 @@ url = wcl_api.build_authorize_url("cid", 4480, "st4te")
 ok("client_id=cid" in url, "l'URL d'autorisation porte le client_id")
 ok("response_type=code" in url, "response_type=code")
 ok("state=st4te" in url, "le state est transmis")
+ok("scope=view-user-profile+view-private-reports" in url,
+   "les deux scopes sont demandes (sans view-private-reports, le jeton est "
+   "valide mais le contenu des rapports reste refuse)")
 ok("redirect_uri=http%3A%2F%2Flocalhost%3A4480%2Fcallback" in url, "redirect_uri encodee")
 ok(wcl_api.redirect_uri(4480) == "http://localhost:4480/callback", "redirect_uri lisible")
 
@@ -77,14 +80,33 @@ cache = ROOT / wcl_api.TOKEN_CACHE_NAME
 saved = cache.read_text(encoding="utf-8") if cache.exists() else None
 now = 1_000_000.0
 try:
-    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now + 3600}), encoding="utf-8")
+    full = list(wcl_api.SCOPES)
+
+    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now + 3600,
+                                 "scopes": full}), encoding="utf-8")
     ok(wcl_api.load_cached_token(now) == "tok", "jeton encore valide : reutilise")
 
-    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now + 10}), encoding="utf-8")
+    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now + 10,
+                                 "scopes": full}), encoding="utf-8")
     ok(wcl_api.load_cached_token(now) == "", "jeton qui expire dans 10 s : rejete (marge)")
 
-    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now - 1}), encoding="utf-8")
+    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now - 1,
+                                 "scopes": full}), encoding="utf-8")
     ok(wcl_api.load_cached_token(now) == "", "jeton expire : rejete")
+
+    # Le cas qui a mordu en vrai : un jeton obtenu avant l'ajout des scopes est
+    # valide et non expire, donc indefiniment reutilisable — et refuse a chaque
+    # requete. Il doit etre traite comme absent, pas comme utilisable.
+    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now + 3600}),
+                     encoding="utf-8")
+    ok(wcl_api.load_cached_token(now) == "", "jeton sans scopes enregistres : rejete")
+    ok(wcl_api.load_refresh_token() == "", "refresh sans scopes : rejete (memes scopes au retour)")
+
+    cache.write_text(json.dumps({"access_token": "tok", "expires_at": now + 3600,
+                                 "scopes": ["view-user-profile"],
+                                 "refresh_token": "r"}), encoding="utf-8")
+    ok(wcl_api.load_cached_token(now) == "", "jeton aux scopes incomplets : rejete")
+    ok(wcl_api.load_refresh_token() == "", "refresh aux scopes incomplets : rejete")
 
     cache.write_text("{ ceci n'est pas du json", encoding="utf-8")
     ok(wcl_api.load_cached_token(now) == "", "cache corrompu : traite comme absent, pas d'exception")
@@ -96,6 +118,7 @@ try:
     wcl_api.save_cached_token({"access_token": "a", "refresh_token": "r", "expires_in": 3600}, now)
     written = json.loads(cache.read_text(encoding="utf-8"))
     ok(written["expires_at"] == now + 3600, "expires_in converti en date absolue")
+    ok(sorted(written["scopes"]) == sorted(wcl_api.SCOPES), "scopes demandes enregistres")
     ok(wcl_api.load_refresh_token() == "r", "refresh_token relu")
 finally:
     if saved is None:
