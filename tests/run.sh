@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verification complete hors du jeu :
-#   1. syntaxe de tous les fichiers Lua
+#   1. syntaxe de tous les fichiers Lua, bibliotheques embarquees a part
 #   2. suite headless sur 4 configurations de client
 #   3. classement de l'ingestion WCL (heuristique des zones a fuir)
 #   4. fusion a la regeneration (la data ecrite a la main doit survivre)
@@ -34,8 +34,24 @@ while IFS= read -r file; do
         sed 's/^/        /' /tmp/mbs-lua-err
         status=1
     fi
-done < <(find Core Modules tests -name '*.lua' | LC_ALL=C sort)
+done < <(find Core Modules tests -name '*.lua' -not -path 'Modules/*/Libs/*' | LC_ALL=C sort)
 [ "$status" -eq 0 ] && echo "  ok"
+
+# Les bibliotheques embarquees sont du code tiers : on ne les corrige pas, on
+# verifie seulement que la copie est intacte. Une erreur ici ne dit pas "bug
+# dans MyBossSuite", elle dit "la copie est tronquee ou l'amont a change".
+echo
+echo "== bibliotheques embarquees (copie intacte)"
+lib_status=0
+while IFS= read -r file; do
+    if ! "$LUA" -e "assert(loadfile('$file'))" 2>/tmp/mbs-lua-err; then
+        echo "  FAIL $file (code tiers — cf. Modules/CDTracker/Libs/README.md)"
+        sed 's/^/        /' /tmp/mbs-lua-err
+        lib_status=1
+        status=1
+    fi
+done < <(find Modules -path 'Modules/*/Libs/*' -name '*.lua' | LC_ALL=C sort)
+[ "$lib_status" -eq 0 ] && echo "  ok"
 
 echo
 echo "== suite headless"

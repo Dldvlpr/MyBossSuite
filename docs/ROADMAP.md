@@ -559,9 +559,18 @@ L'approche shim + `dofile` **ne fonctionne pas sur BigWigs** : les modules moder
 
 DBM est nettement plus shimmable : les timers y sont déclarés au chargement avec la durée en argument du constructeur (`self:NewCastTimer(12, 17086)`), donc capturables statiquement.
 
-Mais : **un fichier généré depuis du code GPL reste une œuvre dérivée**, quelle que soit la transformation. Si tu passes par là, l'addon entier bascule sous GPL et il faut un `NOTICE` + publication des sources. Extrait depuis WCL, non. C'est la raison principale de mettre 3a en tête.
+**Correction, relevé le 2026-09-08 dans les dépôts amont** : cette phase partait du principe que DBM et BigWigs étaient sous GPL, donc qu'accepter la GPL suffirait à en dériver de la data. C'est faux, et dans le mauvais sens.
 
-Ordre par boss : **3a** → 3b si une aura `EVENT` existe déjà et couvre le cas → 3c uniquement en dernier recours, en acceptant la contrainte de licence.
+| Projet | Licence réelle | Source |
+|---|---|---|
+| DBM | **All Rights Reserved**, `Copyright (c) 2021 Deadly Boss Mods` | `LICENSE` du dépôt |
+| BigWigs | **All Rights Reserved** : « You are free to fork and modify on GitHub, please ask us about anything else » | `## X-License` de `BigWigs.toc` |
+
+Aucun des deux n'accorde de droit de dériver hors de son propre dépôt. Passer MyBossSuite sous GPL **n'ouvre donc rien ici** : la contrainte n'est pas « ta licence est incompatible », elle est « tu n'as pas le droit ». La phase 3c est fermée, et elle l'aurait été quelle que soit la licence choisie.
+
+La seule porte qui reste est explicitement nommée par BigWigs : *demander*. Une autorisation écrite des auteurs, pour un usage précis. Tant qu'elle n'existe pas, WCL est la source unique — ce qui ne change rien au plan réel, puisque 3a est de toute façon la seule source qui donne de la data **par version de jeu**.
+
+Ordre par boss : **3a** → 3b si une aura `EVENT` existe déjà et couvre le cas → 3c uniquement avec une autorisation écrite.
 
 ---
 
@@ -610,7 +619,7 @@ Delta recalculé à chaque swing, jamais stocké en dur : la vitesse d'attaque c
 
 Principe : chaque client connaît **son propre** cooldown exact (`GetSpellCooldown` tient compte des talents, du haste et des procs pour soi-même). Chaque client broadcast sa vraie valeur au groupe via addon message, au lieu de deviner celle des autres.
 
-- [ ] `Modules/CDTracker/Libs/LibOpenRaid/` — embed (licence permissive)
+- [x] `Modules/CDTracker/Libs/LibOpenRaid/` — embarquée (fait). **Licence : LGPL 2.1, pas « permissive »** comme annoncé ici. Sans conséquence pratique — un addon WoW est distribué en source, et on ne modifie pas une ligne de la lib — et sa section 3 autorise de prendre une copie sous GPL v2 « ou une version plus récente », donc aucun conflit avec la GPL v3 de l'addon. `LibStub` est embarquée avec (domaine public) : LibOpenRaid s'y déclare et ne l'embarque pas.
 - [ ] `Modules/CDTracker/CDTracker.lua`
 
 ```lua
@@ -622,7 +631,21 @@ if LibOpenRaid then
 end
 ```
 
-**À vérifier avant de bâtir dessus** : LibOpenRaid est conçue pour retail. Son support classic est partiel selon les branches. Si elle ne tourne pas sur tes flavors cibles, tu es en fallback statique 100% du temps en classic — ce qui change complètement la valeur du module, et potentiellement la décision de le faire. Teste en premier, en groupe réel, avant d'écrire l'UI.
+**Vérifié — et la réponse est non.** LibOpenRaid n'est pas « partielle » en classic, elle ne se charge pas du tout :
+
+```lua
+LIB_OPEN_RAID_CAN_LOAD = false
+--don't load if it's not retail, emergencial patch due to classic and bcc stuff not transposed yet
+if (WOW_PROJECT_ID ~= WOW_PROJECT_MAINLINE and not isExpansion_Dragonflight()) then
+    return
+end
+```
+
+Sur Classic Era, TBC, Wrath, Cata et MoP Classic, aucune bibliothèque n'est déclarée et `LibStub:GetLibrary("LibOpenRaid-1.0", true)` rend `nil`. Les fichiers `ThingsToMantain_Era/BurningCrusade/Wrath/Cata/Pandaria` existent — l'auteur prévoit le support — mais ne sont jamais atteints. Ça n'a pas demandé de test en groupe réel : c'est en tête du fichier.
+
+**Ce que ça change** : sur cinq des six flavors visés, il n'y a rien à recevoir. Le fallback statique n'est pas le cas dégradé du module, il *est* le module en classic. Le broadcast entre joueurs de MyBossSuite reste possible via `Core/Comm.lua` (déjà écrit pour le Boss Timer) — c'est la seule façon d'avoir un CD exact en classic, et elle ne couvre que les joueurs qui font aussi tourner MyBossSuite.
+
+Le `.toc` n'inscrit donc la lib que sur retail : l'inscrire ailleurs ne ferait que compiler 600 Ko de Lua pour rien.
 
 - [ ] Fallback : joueur non compatible → table statique `Data/Specs.lua`, par flavor (les CD de base diffèrent énormément entre vanilla et retail).
 
@@ -793,5 +816,5 @@ README.md
 - **Vanilla 1.x : jusqu'où ?** `C_Timer.NewTimer` et `C_NamePlate` manquent sur les builds les plus anciens. Soit tu écris un scheduler `OnUpdate` maison dans Compat, soit tu poses un plancher (ex. Classic Era actuel plutôt que 1.12 littéral) et tu le documentes. Décider maintenant : ça conditionne la moitié de Compat.
 - **Data par flavor : dossiers séparés ou table d'overrides ?** Dossiers = plus lisible et pas de data morte chargée, overrides = moins de duplication quand les timings sont identiques. Le choix impacte le générateur WCL, donc à trancher avant d'écrire `tools/wcl-ingest`.
 - **WeakAuras : ratio `EVENT` vs `BOSS_MOD` ?** Le `grep` de la Phase 3b répond en 30 secondes et détermine si 3b vaut le code qu'il demande.
-- **BigWigs/DBM : acceptes-tu de passer l'addon sous GPL ?** Si non, 3c est hors table et WCL devient la source unique — ce qui simplifie beaucoup mais rend l'ingestion critique.
-- **CD Tracker : LibOpenRaid tourne-t-elle sur tes flavors classic ?** À tester avant toute écriture de module.
+- ~~**BigWigs/DBM : acceptes-tu de passer l'addon sous GPL ?**~~ **Tranché, et la question était mal posée.** L'addon est sous **GPL v3** (`LICENSE` à la racine, `## X-License` dans les six `.toc`). Mais ça n'ouvre pas 3c : DBM et BigWigs sont *All Rights Reserved*, pas GPL — voir 3c. WCL est la source unique, ce qui rend l'ingestion critique.
+- ~~**CD Tracker : LibOpenRaid tourne-t-elle sur tes flavors classic ?**~~ **Non — répondu par le code, sans test en jeu.** `LibOpenRaid.lua` sort en tête de fichier sur tout client non retail (`--don't load if it's not retail, emergencial patch due to classic and bcc stuff not transposed yet`). Sur les cinq flavors classic, `LIB_OPEN_RAID_CAN_LOAD` reste `false` et rien ne se déclare dans LibStub. Voir `Modules/CDTracker/Libs/README.md`.

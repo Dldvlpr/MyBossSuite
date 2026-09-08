@@ -6,12 +6,14 @@
 ## SavedVariables: MyBossSuiteDB
 ## SavedVariablesPerCharacter: MyBossSuiteCharDB
 ## X-Flavor: vanilla
+## X-License: GPL-3.0-or-later
 
 # ATTENTION : fichier genere par tools/gen-toc.sh — ne pas editer a la main.
 #
 # L'ordre de load est le seul mecanisme de dependance qui existe :
 # Compat -> Scheduler -> EventBus -> Comm -> DB -> Anchors -> Bars -> Alerts -> Config -> ModuleLoader -> Modules
 
+# LibOpenRaid ne se charge pas sur ce flavor (garde amont retail).
 Core/Compat.lua
 Core/Scheduler.lua
 Core/EventBus.lua

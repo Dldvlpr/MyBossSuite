@@ -6,12 +6,14 @@
 ## SavedVariables: MyBossSuiteDB
 ## SavedVariablesPerCharacter: MyBossSuiteCharDB
 ## X-Flavor: @FLAVOR@
+## X-License: GPL-3.0-or-later
 
 # ATTENTION : fichier genere par tools/gen-toc.sh — ne pas editer a la main.
 #
 # L'ordre de load est le seul mecanisme de dependance qui existe :
 # Compat -> Scheduler -> EventBus -> Comm -> DB -> Anchors -> Bars -> Alerts -> Config -> ModuleLoader -> Modules
 
+@LIB_FILES@
 Core/Compat.lua
 Core/Scheduler.lua
 Core/EventBus.lua

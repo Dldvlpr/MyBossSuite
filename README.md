@@ -18,9 +18,9 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 2c | Synchronisation entre joueurs (pull, phases, kill) | fait |
 | 3a | `tools/wcl-ingest` (WarcraftLogs), bornes de phase comprises | outil écrit, **data à générer** |
 | 3b | `tools/wa-extract` (WeakAuras perso) | outil écrit |
-| 3c | Extraction depuis DBM/BigWigs | non fait — décision de licence à trancher |
+| 3c | Extraction depuis DBM/BigWigs | **fermée** — les deux sont *All Rights Reserved*, pas GPL |
 | 4 | Module Swing Timer | fait |
-| 5 | Module CD Tracker | non fait — dépend d'un test LibOpenRaid en groupe réel |
+| 5 | Module CD Tracker | lib embarquée ; module non écrit — **LibOpenRaid ne tourne pas en classic** |
 | 6 | Module Interrupt Rotation | non fait — dépend de la phase 5 |
 | 7 | `Core/Alerts.lua`, alerte Kick, alerte Move (GTFO) | fait |
 | 7b | `tools/wcl-ingest/wcl_alerts.py` (data kick + move) | outil écrit, **data à générer** |
@@ -267,6 +267,9 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
 * **Précision du CD Tracker** (quand il existera) : Blizzard bloque la lecture
   du cooldown exact d'un autre joueur sans son broadcast. Sans addon compatible
   en face, ce sera de l'estimé — et un CD estimé devra s'afficher comme tel.
+  En **classic, c'est le cas nominal** : LibOpenRaid ne s'y charge pas du tout
+  (`--don't load if it's not retail` en tête de son fichier), donc rien n'arrive
+  d'un joueur qui ne fait pas tourner MyBossSuite.
 * **Alerte kick sur les clients les plus anciens** : `UnitCastingInfo` ne répond
   rien sur une unité hostile. Le repli lit `SPELL_CAST_START` dans le combat log,
   qui ne dit pas si le sort est protégé — l'alerte assume alors *interruptible*
@@ -385,15 +388,29 @@ la bonne raison. La liste des kicks est une preuve directe et n'a rien à
 départager ; la liste des zones est une heuristique, et une heuristique non testée
 est une heuristique fausse.
 
+## Licence
+
+MyBossSuite est sous **GPL v3 ou ultérieure** (`LICENSE` à la racine).
+
+Deux bibliothèques sont embarquées sous `Modules/CDTracker/Libs/`, avec leur
+licence d'origine et sans aucune modification : **LibStub** (domaine public) et
+**LibOpenRaid-1.0** (LGPL 2.1). Voir `Modules/CDTracker/Libs/README.md` pour les
+versions exactes et la procédure de mise à jour.
+
+Ce choix **n'ouvre pas** l'extraction depuis DBM ou BigWigs : les deux sont
+*All Rights Reserved*, pas GPL — la contrainte n'est pas une incompatibilité de
+licence, c'est une absence de droit. Les timings de l'addon viennent de mesures
+faites dans des logs publics (`tools/wcl-ingest`), qui sont des faits et non une
+œuvre dérivée.
+
 ## Questions encore ouvertes
 
-1. **BigWigs/DBM : acceptes-tu de passer l'addon sous GPL ?** Tant que la
-   réponse est non, la phase 3c reste hors table, WCL est la source unique — et
-   aucun fichier de licence n'est posé dans le dépôt en attendant ta décision.
-2. **WeakAuras : quel est ton ratio `EVENT` / `BOSS_MOD` ?**
+1. **WeakAuras : quel est ton ratio `EVENT` / `BOSS_MOD` ?**
    `tools/wa-extract/wa_extract.py count <ton WeakAuras.lua>` répond en 30
    secondes et décide si la phase 3b vaut le code qu'elle demande.
-3. **LibOpenRaid tourne-t-elle sur tes flavors classic ?** À tester en groupe
-   réel avant d'écrire la moindre ligne du CD Tracker : si la réponse est non,
-   le module est en fallback statique 100 % du temps en classic, ce qui change
-   sa valeur et peut-être la décision de le faire.
+2. **CD Tracker : que fait-il en classic ?** LibOpenRaid ne s'y charge pas (garde
+   amont retail), donc le fallback n'est pas le cas dégradé du module, il *est*
+   le module sur cinq flavors sur six. Trois directions possibles : lib
+   uniquement (retail seul), table statique par flavor (gros travail de data),
+   ou broadcast entre porteurs de MyBossSuite via `Core/Comm.lua` — exact, mais
+   seulement entre joueurs qui ont l'addon.
