@@ -599,6 +599,44 @@ Les dégâts directs d'un sort inconnu n'alertent **jamais** : sans base de donn
 curée, la moindre attaque de boss ferait hurler l'addon. C'est la limite assumée
 du module, et la raison de la liste personnelle (`/mbs move add|ignore`).
 
+### 7.3 Data des deux alertes — `tools/wcl-ingest/wcl_alerts.py`
+
+- [x] `tools/wcl-ingest/wcl_api.py` — transport WCL extrait, partagé avec `wcl_ingest.py`
+- [x] `tools/wcl-ingest/wcl_alerts.py` — les deux listes en un passage
+- [x] `tests/test_wcl_alerts.py` — classement testé sur des logs synthétiques
+- [ ] data réellement générée (demande `WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`)
+
+Même source que les timings, donc même argument de licence : des faits mesurés
+dans des logs publics, par version de jeu. Reprendre la base de GTFO ferait de
+l'addon une œuvre dérivée, exactement comme une extraction depuis DBM — et elle
+ne couvre pas les six flavors.
+
+**Deux natures de preuve, à ne pas confondre.**
+
+`Interrupts` : un sort qui apparaît en `extraAbilityGameID` d'un événement
+`interrupt` *a été* interrompu dans cette version du jeu. Une occurrence suffit,
+aucun seuil statistique n'a de sens. La liste ne sert qu'au repli combat log :
+quand `UnitCastingInfo` répond, elle fait foi et la data n'est même pas lue.
+
+`DamageTaken` + `Debuffs` : rien dans un log ne dit « ce sort était évitable ».
+C'est une déduction, donc les critères sont explicites, réglables, et chaque
+entrée générée porte en commentaire les chiffres qui l'ont fait retenir :
+
+1. plusieurs joueurs différents touchés ;
+2. pas de debuff du même sort sur eux au moment du coup (sinon : DoT) ;
+3. pas tout le raid à chaque pull (sinon : dégât inévitable) ;
+4. périodique, **ou** touchant des joueurs différents d'un pull à l'autre.
+
+Le critère 4 est celui qui apporte quelque chose que l'heuristique live ne peut
+pas avoir : sur un seul tick, un swirl et un cleave sont indiscernables ; sur
+cinquante pulls, le cleave touche toujours les mêmes corps à corps et le swirl
+touche ceux qui n'en sont pas sortis. C'est aussi ce qui permet enfin de couvrir
+la zone qui **ne tape qu'une fois**, angle mort structurel du module live.
+
+Avec un seul log, ce critère ne peut pas se prononcer et les sorts non
+périodiques sont écartés : une liste courte et juste vaut mieux qu'une longue qui
+alerte à tort.
+
 ---
 
 ## Ordre de build
@@ -636,6 +674,8 @@ Modules/
   BossTimer/
     BossTimer.lua
     Data/<flavor>/<Raid>/<Boss>.lua
+  InterruptAlert/Data/<flavor>/<Raid>.lua
+  MoveAlert/Data/<flavor>/<Raid>.lua
   CDTracker/
     CDTracker.lua
     Data/<flavor>/Specs.lua
@@ -644,6 +684,9 @@ Modules/
 tools/
   gen-toc.sh
   wcl-ingest/            (source principale de data)
+    wcl_api.py           (transport partage)
+    wcl_ingest.py        (timings boss)
+    wcl_alerts.py        (sorts kickables + zones a fuir)
   wa-extract/            (parsing WeakAuras perso)
 README.md
 ```

@@ -112,6 +112,7 @@ Mock.spells = {
     [22271] = { name = "Fire Patch", icon = "icon-22271" },
     [22272] = { name = "Corruption", icon = "icon-22272" },
     [22273] = { name = "Cleave", icon = "icon-22273" },
+    [22274] = { name = "Fire Wall", icon = "icon-22274" },
 }
 
 -- Grimoire du personnage mock : un voleur qui connait Kick, et rien d'autre.

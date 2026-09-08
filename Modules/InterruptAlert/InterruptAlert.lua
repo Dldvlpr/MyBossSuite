@@ -12,11 +12,18 @@ local _, ns = ...
 
 local Alerts = ns.Alerts
 
+-- Remplie par les fichiers de Data/, chargés après ce fichier : les sorts dont
+-- un log prouve qu'ils ont ete interrompus dans cette version du jeu.
+ns.InterruptableData = ns.InterruptableData or {}
+
+local InterruptableData = ns.InterruptableData
+
 local M = ns:NewModule("interruptAlert", {
     enabled       = true,
     watchFocus    = true,    -- surveille aussi le focus
     onlyWhenReady = true,    -- n'alerte que si ton kick est dispo
     checkRange    = true,    -- ... et que la cible est a portee
+    dataOnly      = false,   -- repli combat log : n'alerter que sur la data
     spellId       = nil,     -- override manuel du sort d'interruption
     alert = Alerts.MakeDefaults({
         text      = "KICK",
@@ -187,8 +194,34 @@ local function CanAttackUnit(unit)
     return true
 end
 
+--- Ce sort est-il prouve interruptible par les logs ? nil = inconnu de la data,
+-- ce qui ne veut pas dire "protege" : la data est partielle par construction.
+function M:IsKnownInterruptible(spellId)
+    return InterruptableData[spellId]
+end
+
+function M:CountData()
+    local n = 0
+    for _ in pairs(InterruptableData) do n = n + 1 end
+    return n
+end
+
+function M:ListData()
+    local out = {}
+    for spellId in pairs(InterruptableData) do out[#out + 1] = spellId end
+    table.sort(out)
+    return out
+end
+
 --- Premiere incantation interruptible trouvee sur les unites surveillees.
 -- Retourne unit, name, icon, spellId.
+--
+-- Deux sources, dans cet ordre strict :
+--   1. l'API du client (`notInterruptible`) — elle sait, elle fait foi, et la
+--      data ne peut jamais la contredire ;
+--   2. le combat log, la ou l'API ne repond rien sur une unite hostile. Le log
+--      ne dit pas si le sort est protege : la data tranche quand elle connait le
+--      sort, sinon on assume interruptible (ou on se tait, avec `dataOnly`).
 function M:FindCast(config)
     for i = 1, #WATCH_UNITS do
         local unit = WATCH_UNITS[i]
@@ -196,12 +229,21 @@ function M:FindCast(config)
             and UnitExists(unit) and CanAttackUnit(unit) then
 
             local name, icon, _, _, notInterruptible, spellId = ns.GetCastInfo(unit)
-            if not name then
-                name, icon, spellId = self:FallbackCast(UnitGUID(unit))
-                notInterruptible = false
-            end
-            if name and not notInterruptible then
-                return unit, name, icon or (spellId and ns.GetSpellTexture(spellId)), spellId
+            if name then
+                if not notInterruptible then
+                    return unit, name, icon or (spellId and ns.GetSpellTexture(spellId)),
+                        spellId, false
+                end
+            else
+                local fallbackName, fallbackIcon, fallbackSpell = self:FallbackCast(UnitGUID(unit))
+                if fallbackName then
+                    local proven = InterruptableData[fallbackSpell] ~= nil
+                    if proven or config.dataOnly ~= true then
+                        return unit, fallbackName,
+                            fallbackIcon or (fallbackSpell and ns.GetSpellTexture(fallbackSpell)),
+                            fallbackSpell, not proven
+                    end
+                end
             end
         end
     end
@@ -225,7 +267,7 @@ function M:Evaluate()
         return self:Sleep()
     end
 
-    local unit, name, icon, spellId = self:FindCast(config)
+    local unit, name, icon, spellId, assumed = self:FindCast(config)
     if not unit then
         self:ClearAlert()
         return self:Sleep()
@@ -246,12 +288,12 @@ function M:Evaluate()
         return self:ClearAlert()
     end
 
-    self:ShowAlert(unit, name, icon, spellId)
+    self:ShowAlert(unit, name, icon, spellId, assumed)
 end
 
 --- Une signature par incantation : le meme cast ne doit pas rejouer le son ni
 -- reflasher a chaque tick du ticker.
-function M:ShowAlert(unit, name, icon, spellId)
+function M:ShowAlert(unit, name, icon, spellId, assumed)
     local signature = unit .. "|" .. tostring(spellId or name)
     if self.showing == signature then return end
     self.showing = signature
@@ -259,7 +301,9 @@ function M:ShowAlert(unit, name, icon, spellId)
     Alerts:Show(ALERT_KEY, {
         sticky   = true,
         icon     = icon,
-        subtitle = name,
+        -- Le point d'interrogation dit la verite : l'incantation vient du combat
+        -- log, rien ne prouve qu'elle soit interruptible.
+        subtitle = assumed and (name .. " |cffaaaaaa(?)|r") or name,
     })
     ns.EventBus:Fire("INTERRUPT_ALERT", unit, spellId, name)
 end
@@ -366,6 +410,8 @@ function M:StatusLines()
         ("lecture des incantations : %s"):format(
             ns.has.unitCastInfo and "API du client (+ repli combat log)"
                 or "combat log uniquement"),
+        ("sorts interruptibles connus : %d   repli data seule : %s"):format(
+            self:CountData(), config.dataOnly and "oui" or "non"),
     }
 end
 

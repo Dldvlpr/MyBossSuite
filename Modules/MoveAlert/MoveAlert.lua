@@ -21,6 +21,14 @@ local _, ns = ...
 
 local Alerts = ns.Alerts
 
+-- Remplie par les fichiers de Data/, charges apres ce fichier : les zones
+-- etablies statistiquement sur des logs (voir tools/wcl-ingest/wcl_alerts.py).
+-- Elle complete l'heuristique, elle ne la remplace pas : rien ne garantit
+-- qu'un raid, un donjon ou un patch recent soit couvert.
+ns.MoveAlertData = ns.MoveAlertData or {}
+
+local MoveAlertData = ns.MoveAlertData
+
 local M = ns:NewModule("moveAlert", {
     enabled       = true,
     threshold     = 0.02,   -- part des PV max sous laquelle un coup est ignore
@@ -79,9 +87,29 @@ local lastAlert = {}   -- [cle] = timestamp de la derniere alerte
 -- Liste personnelle
 --------------------------------------------------------------------------------
 
+--- Dans TA liste (apprise ou ajoutee a la main).
 function M:IsKnown(spellId)
     local config = self:GetConfig()
     return config and config.spells[spellId] == true
+end
+
+--- Dans ta liste OU dans la data livree : les deux alertent des le premier coup.
+function M:IsListed(spellId)
+    if MoveAlertData[spellId] ~= nil then return true end
+    return self:IsKnown(spellId)
+end
+
+function M:CountData()
+    local n = 0
+    for _ in pairs(MoveAlertData) do n = n + 1 end
+    return n
+end
+
+function M:ListData()
+    local out = {}
+    for spellId in pairs(MoveAlertData) do out[#out + 1] = spellId end
+    table.sort(out)
+    return out
 end
 
 function M:Learn(spellId)
@@ -185,7 +213,9 @@ function M:OnDamage(spellId, spellName, amount, periodic)
     if not config or not spellId then return false end
     if config.ignored[spellId] then return false end
 
-    local known = config.spells[spellId] == true
+    -- La data livree vaut liste personnelle : elle a deja fait la preuve
+    -- statistique que l'heuristique tente de refaire a chaque tick.
+    local known = config.spells[spellId] == true or MoveAlertData[spellId] ~= nil
     if not known then
         if not periodic then return false end
         if (amount or 0) < self:MinimumAmount(config) then return false end
@@ -254,8 +284,8 @@ function M:StatusLines()
             config.learn ~= false and "oui" or "non",
             config.environmental ~= false and "oui" or "non",
             config.ignoreDebuffs ~= false and "oui" or "non"),
-        ("zones connues : %d   ignorees : %d")
-            :format(#self:ListSpells(), #self:ListIgnored()),
+        ("zones : %d livrees + %d apprises   ignorees : %d")
+            :format(self:CountData(), #self:ListSpells(), #self:ListIgnored()),
     }
 end
 

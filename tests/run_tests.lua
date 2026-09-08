@@ -61,6 +61,8 @@ local FILES = {
     "Modules/InterruptAlert/InterruptAlert.lua",
     "Modules/MoveAlert/MoveAlert.lua",
     "Modules/BossTimer/Data/vanilla/Onyxias_Lair/Onyxia.lua",
+    -- Les fichiers de data se chargent en dernier, comme dans un .toc.
+    "tests/fixtures/AlertData.lua",
 }
 
 -- `--no-c-timer` simule un client Classic Era ancien sans C_Timer : c'est le
@@ -457,6 +459,28 @@ equal(kickDisplay:IsShown(), false, "repli combat log : alerte retiree au SUCCES
 Mock.FireCombatLog("SPELL_CAST_START", "Creature-0-1-2-3-99999-000009", PLAYER_GUID, 18435, "Autre")
 equal(kickDisplay:IsShown(), false, "incantation d'une autre unite : ignoree")
 
+-- Data livree : elle ne tranche que sur le repli combat log, jamais contre
+-- l'API du client.
+equal(kick:CountData(), 1, "data des sorts interruptibles chargee")
+ok(kick:IsKnownInterruptible(18435), "sort prouve interruptible par les logs")
+equal(kick:IsKnownInterruptible(17086), nil, "sort absent de la data")
+
+kick:GetConfig().dataOnly = true
+Mock.FireCombatLog("SPELL_CAST_START", BOSS_GUID, PLAYER_GUID, 17086, "Flame Breath")
+equal(kickDisplay:IsShown(), false, "strict : un sort hors data ne declenche rien")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 17086, "Flame Breath")
+Mock.FireCombatLog("SPELL_CAST_START", BOSS_GUID, PLAYER_GUID, 18435, "Fireball Volley")
+ok(kickDisplay:IsShown(), "strict : un sort prouve declenche l'alerte")
+equal(kickDisplay.subtitle:GetText(), "Fireball Volley", "sort prouve : annonce sans reserve")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 18435, "Fireball Volley")
+
+kick:GetConfig().dataOnly = false
+Mock.FireCombatLog("SPELL_CAST_START", BOSS_GUID, PLAYER_GUID, 17086, "Flame Breath")
+ok(kickDisplay:IsShown(), "hors strict : le sort inconnu s'annonce quand meme")
+ok(kickDisplay.subtitle:GetText():find("(?)", 1, true) ~= nil,
+    "... mais marque incertain, parce qu'il l'est")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 17086, "Flame Breath")
+
 ns:SetModuleEnabled("interruptAlert", false)
 equal(kickDisplay:IsShown(), false, "module eteint : alerte retiree")
 
@@ -508,6 +532,21 @@ Mock.Advance(3)
 -- Les degats subis par quelqu'un d'autre ne te concernent pas.
 Mock.FireCombatLog("SPELL_PERIODIC_DAMAGE", BOSS_GUID, "Player-0-9999", 22276, "Zone", 1, 50)
 equal(moveDisplay:IsShown(), false, "degats sur un autre joueur : ignores")
+
+-- Data livree : la preuve statistique est deja faite, donc premier coup, degats
+-- directs compris, et sans passer par le seuil.
+equal(move:CountData(), 1, "data des zones chargee")
+ok(move:IsListed(22274), "zone livree reconnue")
+equal(move:IsKnown(22274), false, "... sans etre inscrite dans ton profil")
+Mock.FireCombatLog("SPELL_DAMAGE", BOSS_GUID, PLAYER_GUID, 22274, "Fire Wall", 1, 1)
+ok(moveDisplay:IsShown(), "zone livree : alerte des le premier coup direct")
+Mock.Advance(3)
+
+-- Ton choix prime sur la data livree.
+move:Ignore(22274)
+Mock.FireCombatLog("SPELL_DAMAGE", BOSS_GUID, PLAYER_GUID, 22274, "Fire Wall", 1, 20)
+equal(moveDisplay:IsShown(), false, "un sort ignore le reste malgre la data")
+move:Unignore(22274)
 
 ns:SetModuleEnabled("moveAlert", false)
 ns:SetModuleEnabled("bossTimer", true)
@@ -576,6 +615,15 @@ equal(ns:GetModule("interruptAlert").interruptSpell, 1766, "/mbs kick spell auto
 SlashCmdList["MYBOSSSUITE"]("kick focus off")
 equal(ns:GetModule("interruptAlert"):GetConfig().watchFocus, false, "/mbs kick focus off")
 SlashCmdList["MYBOSSSUITE"]("kick focus on")
+SlashCmdList["MYBOSSSUITE"]("kick strict on")
+equal(ns:GetModule("interruptAlert"):GetConfig().dataOnly, true, "/mbs kick strict on")
+SlashCmdList["MYBOSSSUITE"]("kick strict off")
+
+Mock.printed = {}
+SlashCmdList["MYBOSSSUITE"]("kick data")
+ok(Mock.FindPrinted("Fireball Volley"), "/mbs kick data liste la data livree")
+SlashCmdList["MYBOSSSUITE"]("move data")
+ok(Mock.FindPrinted("Fire Wall"), "/mbs move data liste la data livree")
 
 --------------------------------------------------------------------------------
 

@@ -31,18 +31,24 @@ Exemples :
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import statistics
 import sys
 import urllib.error
-import urllib.parse
-import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
-TOKEN_URL = "https://www.warcraftlogs.com/oauth/token"
-API_URL = "https://www.warcraftlogs.com/api/v2/client"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from wcl_api import (  # noqa: E402
+    FLAVORS,
+    WCLError,
+    discover_reports,
+    fetch_events,
+    fetch_fight,
+    get_token,
+    parse_report_arg,
+)
 
 # Au-dela de cet ecart-type (en secondes) sur les deltas, le timing est traite
 # comme non deterministe (cooldown interne + choix aleatoire, cast conditionne
@@ -53,128 +59,8 @@ VARIABLE_STDEV = 2.5
 MIN_SAMPLES = 3
 
 
-class WCLError(RuntimeError):
-    pass
-
-
-# ----------------------------------------------------------------------------
-# Transport
-# ----------------------------------------------------------------------------
-
-def get_token(client_id: str, client_secret: str) -> str:
-    data = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
-    request = urllib.request.Request(TOKEN_URL, data=data)
-    credentials = f"{client_id}:{client_secret}".encode()
-    import base64
-
-    request.add_header("Authorization", "Basic " + base64.b64encode(credentials).decode())
-    request.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)["access_token"]
-    except urllib.error.HTTPError as exc:
-        raise WCLError(f"OAuth refuse ({exc.code}) : verifie WCL_CLIENT_ID / WCL_CLIENT_SECRET") from exc
-
-
-def graphql(token: str, query: str, variables: dict) -> dict:
-    payload = json.dumps({"query": query, "variables": variables}).encode()
-    request = urllib.request.Request(API_URL, data=payload)
-    request.add_header("Authorization", "Bearer " + token)
-    request.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(request, timeout=60) as response:
-        body = json.load(response)
-    if "errors" in body:
-        raise WCLError(json.dumps(body["errors"], indent=2))
-    return body["data"]
-
-
-# ----------------------------------------------------------------------------
-# Requetes
-# ----------------------------------------------------------------------------
-
-RANKINGS_QUERY = """
-query($encounterId: Int!, $partition: Int) {
-  worldData {
-    encounter(id: $encounterId) {
-      name
-      fightRankings(metric: speed, partition: $partition)
-    }
-  }
-}
-"""
-
-FIGHT_QUERY = """
-query($code: String!, $fight: Int!) {
-  reportData {
-    report(code: $code) {
-      fights(fightIDs: [$fight]) {
-        id
-        startTime
-        endTime
-        encounterID
-        name
-      }
-      masterData {
-        actors(type: "NPC") { id gameID name }
-      }
-    }
-  }
-}
-"""
-
-EVENTS_QUERY = """
-query($code: String!, $fight: Int!, $start: Float) {
-  reportData {
-    report(code: $code) {
-      events(
-        dataType: Casts
-        hostilityType: Enemies
-        fightIDs: [$fight]
-        startTime: $start
-        limit: 10000
-      ) {
-        data
-        nextPageTimestamp
-      }
-    }
-  }
-}
-"""
-
-
-def discover_reports(token: str, encounter_id: int, limit: int, partition: int | None):
-    data = graphql(token, RANKINGS_QUERY, {"encounterId": encounter_id, "partition": partition})
-    encounter = data["worldData"]["encounter"]
-    if not encounter:
-        raise WCLError(f"rencontre {encounter_id} inconnue")
-    rankings = encounter["fightRankings"] or {}
-    out = []
-    for ranking in rankings.get("rankings", [])[:limit]:
-        report = ranking.get("report") or {}
-        code, fight = report.get("code"), report.get("fightID")
-        if code and fight:
-            out.append((code, int(fight)))
-    return encounter["name"], out
-
-
-def fetch_fight(token: str, code: str, fight_id: int):
-    data = graphql(token, FIGHT_QUERY, {"code": code, "fight": fight_id})
-    report = data["reportData"]["report"]
-    fights = report["fights"]
-    if not fights:
-        raise WCLError(f"combat {fight_id} absent du rapport {code}")
-    actors = {a["id"]: a for a in (report["masterData"]["actors"] or [])}
-    return fights[0], actors
-
-
 def fetch_casts(token: str, code: str, fight_id: int, start: float):
-    events, cursor = [], start
-    while cursor is not None:
-        data = graphql(token, EVENTS_QUERY, {"code": code, "fight": fight_id, "start": cursor})
-        block = data["reportData"]["report"]["events"]
-        events.extend(block["data"] or [])
-        cursor = block.get("nextPageTimestamp")
-    return events
+    return fetch_events(token, code, fight_id, start, "Casts", "Enemies")
 
 
 # ----------------------------------------------------------------------------
@@ -188,7 +74,7 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool):
 
     for code, fight_id in reports:
         try:
-            fight, actors = fetch_fight(token, code, fight_id)
+            fight, actors, _ = fetch_fight(token, code, fight_id)
             events = fetch_casts(token, code, fight_id, float(fight["startTime"]))
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} ignore ({exc})", file=sys.stderr)
@@ -320,8 +206,7 @@ def parse_args(argv=None):
     parser.add_argument("--encounter", type=int, help="encounterID WCL (decouverte automatique des logs)")
     parser.add_argument("--partition", type=int, help="partition WCL (une par version/saison)")
     parser.add_argument("--npc-id", type=int, required=True, help="npcId du boss, cle du fichier de data")
-    parser.add_argument("--flavor", required=True,
-                        choices=["vanilla", "tbc", "wrath", "cata", "mists", "retail"])
+    parser.add_argument("--flavor", required=True, choices=FLAVORS)
     parser.add_argument("--raid", required=True, help="dossier de raid, ex. Onyxias_Lair")
     parser.add_argument("--boss", required=True, help="nom du boss (affichage + nom de fichier)")
     parser.add_argument("--limit", type=int, default=10, help="nombre de logs (defaut 10)")
@@ -351,11 +236,11 @@ def main(argv=None) -> int:
     encounter_name = ""
     reports = []
     for item in args.report:
-        code, _, fight = item.partition(":")
-        if not fight.isdigit():
-            print(f"format attendu CODE:FIGHT, recu {item!r}", file=sys.stderr)
+        try:
+            reports.append(parse_report_arg(item))
+        except WCLError as exc:
+            print(exc, file=sys.stderr)
             return 2
-        reports.append((code, int(fight)))
 
     if args.encounter and not reports:
         try:

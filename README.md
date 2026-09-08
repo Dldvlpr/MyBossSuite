@@ -21,6 +21,7 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 5 | Module CD Tracker | non fait — dépend d'un test LibOpenRaid en groupe réel |
 | 6 | Module Interrupt Rotation | non fait — dépend de la phase 5 |
 | 7 | `Core/Alerts.lua`, alerte Kick, alerte Move (GTFO) | fait |
+| 7b | `tools/wcl-ingest/wcl_alerts.py` (data kick + move) | outil écrit, **data à générer** |
 
 Livrable atteint : **un addon installable, configurable, avec quatre modules
 fonctionnels** (Swing Timer, Boss Timer, alerte Kick, alerte Move), plutôt que
@@ -63,7 +64,10 @@ chaque client charge celui qui correspond à son suffixe.
 | `/mbs kick [status]` | interrupt détecté, disponibilité, options |
 | `/mbs kick spell <id>\|auto` | force le sort d'interruption suivi |
 | `/mbs kick focus\|portee\|dispo on\|off` | conditions de déclenchement |
-| `/mbs move [status\|list]` | seuils et liste des zones connues |
+| `/mbs kick strict on\|off` | sur le repli combat log, n'annoncer que ce que la data prouve |
+| `/mbs kick data` | sorts prouvés interruptibles par les logs |
+| `/mbs move [status\|list]` | seuils, zones apprises, sorts ignorés |
+| `/mbs move data` | zones livrées avec l'addon |
 | `/mbs move add\|remove\|ignore\|unignore <spellId>` | édite la liste personnelle |
 | `/mbs move seuil <pct>` / `apprentissage on\|off` | seuil en % des PV max, mémorisation auto |
 
@@ -141,6 +145,18 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   une aura que tu portes, s'écarter n'y change rien). Les dégâts *directs* d'un
   sort inconnu n'alertent jamais : sans base curée, la moindre attaque de boss
   ferait hurler l'addon. Ce qui est détecté une fois est mémorisé dans le profil.
+* **La data d'alerte vient des logs, jamais d'un autre addon.** Reprendre la base
+  de GTFO ferait de cet addon une œuvre dérivée, exactement comme une extraction
+  depuis DBM — et elle ne couvre pas les six flavors. Les timings, les kicks et
+  les zones sortent tous de la même source : des faits mesurés dans des logs
+  publics, par version de jeu.
+* **Une liste de kicks ne peut pas contredire le client.** Quand
+  `UnitCastingInfo` répond, elle fait foi et la data n'est pas consultée. La
+  liste ne sert qu'au repli combat log — et ce qu'elle ne couvre pas s'affiche
+  avec un `(?)`, plutôt que de laisser croire à une certitude qu'on n'a pas.
+* **Une zone livrée alerte comme une zone apprise**, dès le premier coup et sans
+  seuil : la preuve statistique a déjà été faite hors ligne, la refaire à chaque
+  tick n'apporterait rien. Ton `/mbs move ignore` prime dans tous les cas.
 * **Alerte = frame dédiée, la barre reste une barre.** `warnBefore` continue de
   faire passer une barre en rouge ; les alertes kick et move passent par
   `Core/Alerts.lua`, avec son et visuel réglables séparément.
@@ -160,9 +176,17 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
   en face, ce sera de l'estimé — et un CD estimé devra s'afficher comme tel.
 * **Alerte kick sur les clients les plus anciens** : `UnitCastingInfo` ne répond
   rien sur une unité hostile. Le repli lit `SPELL_CAST_START` dans le combat log,
-  qui ne dit pas si le sort est protégé — l'alerte assume alors *interruptible*.
-  Une alerte de trop se voit, un kick manqué non. Le repli ne voit pas non plus
-  les sorts sans temps d'incantation, qui ne sont de toute façon pas kickables.
+  qui ne dit pas si le sort est protégé — l'alerte assume alors *interruptible*
+  et le signale par un `(?)`. `/mbs kick strict on` inverse le compromis : rien
+  que du prouvé. Le repli ne voit pas les sorts sans temps d'incantation, qui ne
+  sont de toute façon pas kickables.
+* **Aucune data d'alerte n'est livrée pour l'instant** : `wcl_alerts.py` est
+  écrit et testé, mais la génération demande des identifiants WarcraftLogs
+  (`WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`). Tant qu'elle n'a pas tourné, les deux
+  modules fonctionnent sur leur seule logique runtime — c'est le mode nominal en
+  donjon, en monde ouvert et sur tout contenu jamais ingéré. Déclarer d'avance
+  qu'un sort est kickable ou qu'une zone est évitable sans l'avoir mesuré serait
+  un mensonge fonctionnel, pas un placeholder.
 * **Interrupts de familier** (Spell Lock, Contre-sort du démoniste) : le cooldown
   d'un sort de familier n'est pas lisible comme celui du joueur. Ces classes
   n'auront d'alerte fiable qu'avec `/mbs kick dispo off`, qui retire la condition
@@ -177,7 +201,8 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
 
 ```bash
 tools/gen-toc.sh            # régénère les 6 .toc (--check en CI)
-tools/wcl-ingest/wcl_ingest.py --help
+tools/wcl-ingest/wcl_ingest.py --help    # timings boss
+tools/wcl-ingest/wcl_alerts.py --help    # sorts kickables + zones à fuir
 tools/wa-extract/wa_extract.py count WeakAuras.lua
 ```
 
@@ -186,6 +211,15 @@ tools/wa-extract/wa_extract.py count WeakAuras.lua
   depuis le pull, écart-type élevé ⇒ `variable = true` (barre affichée comme
   incertaine plutôt que faussement précise). Les timings mesurés sont des faits,
   pas une œuvre dérivée : aucune contrainte de licence.
+* **`wcl-alerts`** (`wcl_alerts.py`) — les deux listes des modules d'alerte, en
+  un seul passage sur les mêmes logs. **Deux natures de preuve, pas une** : un
+  sort qui apparaît en `extraAbilityGameID` d'un événement `interrupt` *a été*
+  interrompu — une occurrence suffit, il n'y a rien à pondérer. Une zone à fuir,
+  elle, ne se prouve pas : elle se déduit de critères explicites (plusieurs
+  joueurs touchés, pas de debuff du même sort sur eux, pas tout le raid, et
+  périodique **ou** touchant des joueurs différents d'un pull à l'autre). Chaque
+  entrée générée porte en commentaire les chiffres qui l'ont fait retenir, pour
+  qu'elle puisse être contestée ; `-v` affiche ce qui a été écarté et pourquoi.
 * **`wa-extract`** — répond d'abord à la question qui décide de tout :
   `count` donne la répartition `EVENT` / `BOSS_MOD` de tes auras. Les
   `BOSS_MOD` sont des wrappers DBM/BigWigs sans durée propre, rien n'en sort ;
@@ -194,13 +228,20 @@ tools/wa-extract/wa_extract.py count WeakAuras.lua
 ## Tests
 
 ```bash
-tests/run.sh        # syntaxe + suite headless (4 clients simulés) + .toc à jour
+tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion + .toc
 ```
 
 La suite charge le vrai code dans un mock d'API WoW et pilote le temps à la
 main : elle vérifie le socle et les quatre modules sur client classic **et**
 retail, avec et sans `C_Timer`. Ça ne remplace pas un test en jeu, mais ça
 attrape les régressions de logique sans lancer WoW.
+
+`tests/test_wcl_alerts.py` teste séparément le **classement** de l'ingestion, sur
+des logs synthétiques et sans réseau : une zone au sol doit être retenue, un DoT,
+un dégât de raid, un cleave et un coup de tank doivent être écartés — chacun pour
+la bonne raison. La liste des kicks est une preuve directe et n'a rien à
+départager ; la liste des zones est une heuristique, et une heuristique non testée
+est une heuristique fausse.
 
 ## Questions encore ouvertes
 

@@ -2,9 +2,10 @@
 # Verification complete hors du jeu :
 #   1. syntaxe de tous les fichiers Lua
 #   2. suite headless sur 4 configurations de client
-#   3. .toc a jour vis-a-vis de tools/gen-toc.sh
+#   3. classement de l'ingestion WCL (heuristique des zones a fuir)
+#   4. .toc a jour vis-a-vis de tools/gen-toc.sh
 #
-# Prerequis : lua5.1 (ou lua) dans le PATH.
+# Prerequis : lua5.1 (ou lua) et python3 dans le PATH.
 
 set -uo pipefail
 
@@ -46,6 +47,15 @@ for variant in "" "--no-c-timer" "--retail" "--retail --no-c-timer"; do
         status=1
     fi
 done
+
+echo
+echo "== ingestion WCL (logique de classement, sans reseau)"
+if output=$(python3 tests/test_wcl_alerts.py 2>&1); then
+    echo "  ok   $(printf '%s' "$output" | tail -n 1)"
+else
+    printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
+    status=1
+fi
 
 echo
 echo "== .toc"

@@ -242,8 +242,8 @@ local HELP = {
     "  |cffffff00/mbs list|r — etat des modules",
     "  |cffffff00/mbs enable|disable|toggle <module>|r",
     "  |cffffff00/mbs alert|r [kick|move] [texte|couleur|taille|duree|son|visuel|flash|test|reset]",
-    "  |cffffff00/mbs kick|r [spell <id>|auto|focus|portee|dispo on/off]",
-    "  |cffffff00/mbs move|r [list|add|remove|ignore|unignore|clear|seuil <pct>|apprentissage on/off]",
+    "  |cffffff00/mbs kick|r [data|spell <id>|auto|focus|portee|dispo|strict on/off]",
+    "  |cffffff00/mbs move|r [list|data|add|remove|ignore|unignore|clear|seuil <pct>|apprentissage on/off]",
     "  |cffffff00/mbs profile|r [nom|list|copy <nom>|reset]",
     "  |cffffff00/mbs debug|r — bascule les messages de debug",
 }
@@ -460,10 +460,25 @@ local function PrintStatus(module)
     for i = 1, #(lines or {}) do print("  " .. lines[i]) end
 end
 
+local function PrintSpellList(module, ids, title)
+    if #ids == 0 then
+        print(("  %s : |cffaaaaaa(vide)|r"):format(title))
+        return
+    end
+    print(("  %s :"):format(title))
+    for i = 1, #ids do
+        print(("    %d — %s"):format(ids[i], ns.GetSpellName(ids[i]) or "?"))
+    end
+end
+
 local KICK_FLAGS = {
     focus  = "watchFocus",
     portee = "checkRange", range = "checkRange",
     dispo  = "onlyWhenReady", ready = "onlyWhenReady",
+    -- `strict` : sur le repli combat log, ne rien annoncer qui ne soit prouve
+    -- interruptible par la data. Zero faux positif, au prix des sorts non
+    -- couverts. Sans effet quand l'API du client repond (elle prime toujours).
+    strict = "dataOnly", dataonly = "dataOnly",
 }
 
 local function HandleKick(arg1, arg2)
@@ -477,6 +492,13 @@ local function HandleKick(arg1, arg2)
 
     local config = module:GetConfig()
     if not config then return end
+
+    if option == "data" then
+        local ids = module:ListData()
+        ns.Print(("sorts interruptibles connus (data livree) : %d"):format(#ids))
+        PrintSpellList(module, ids, "prouves par les logs")
+        return
+    end
 
     if option == "spell" then
         local value = (arg2 or ""):match("^%S+")
@@ -496,7 +518,8 @@ local function HandleKick(arg1, arg2)
 
     local field = KICK_FLAGS[option]
     if not field then
-        ns.Print("usage : /mbs kick [status | spell <id>|auto | focus|portee|dispo on|off]")
+        ns.Print("usage : /mbs kick [status | data | spell <id>|auto | "
+            .. "focus|portee|dispo|strict on|off]")
         return
     end
 
@@ -510,17 +533,6 @@ end
 --------------------------------------------------------------------------------
 -- Module move (/mbs move)
 --------------------------------------------------------------------------------
-
-local function PrintSpellList(module, ids, title)
-    if #ids == 0 then
-        print(("  %s : |cffaaaaaa(vide)|r"):format(title))
-        return
-    end
-    print(("  %s :"):format(title))
-    for i = 1, #ids do
-        print(("    %d — %s"):format(ids[i], ns.GetSpellName(ids[i]) or "?"))
-    end
-end
 
 local function HandleMove(arg1, arg2)
     local module = ns:GetModule("moveAlert")
@@ -538,9 +550,14 @@ local function HandleMove(arg1, arg2)
     local spellId = tonumber(value)
 
     if option == "list" then
-        ns.Print("alerte move :")
-        PrintSpellList(module, module:ListSpells(), "zones connues")
+        ns.Print(("alerte move : %d zone(s) livree(s) — /mbs move data pour les voir")
+            :format(module:CountData()))
+        PrintSpellList(module, module:ListSpells(), "zones apprises")
         PrintSpellList(module, module:ListIgnored(), "sorts ignores")
+    elseif option == "data" then
+        local ids = module:ListData()
+        ns.Print(("zones livrees avec l'addon : %d"):format(#ids))
+        PrintSpellList(module, ids, "mesurees sur les logs")
     elseif option == "add" then
         if not spellId then return ns.Print("usage : /mbs move add <spellId>") end
         config.spells[spellId] = true
@@ -574,7 +591,7 @@ local function HandleMove(arg1, arg2)
         config.learn = bool
         PrintStatus(module)
     else
-        ns.Print("usage : /mbs move [status|list|add|remove|ignore|unignore|clear|"
+        ns.Print("usage : /mbs move [status|list|data|add|remove|ignore|unignore|clear|"
             .. "seuil <pct>|apprentissage on|off]")
     end
 end

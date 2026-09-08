@@ -36,7 +36,10 @@ for entry in "${FLAVORS[@]}"; do
     target="$ROOT/MyBossSuite_${suffix}.toc"
 
     data_files=""
-    for dir in "Modules/BossTimer/Data/$flavor" "Modules/CDTracker/Data/$flavor"; do
+    for dir in "Modules/BossTimer/Data/$flavor" \
+               "Modules/InterruptAlert/Data/$flavor" \
+               "Modules/MoveAlert/Data/$flavor" \
+               "Modules/CDTracker/Data/$flavor"; do
         if [ -d "$ROOT/$dir" ]; then
             while IFS= read -r file; do
                 data_files+="${file#"$ROOT"/}"$'\n'
