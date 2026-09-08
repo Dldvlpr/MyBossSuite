@@ -29,6 +29,7 @@ ns.BossTimerData[<npcId>] = {
     zone        = "<zone>",        -- affichage, /mbs boss list
     inactivity  = <s>,             -- optionnel, delai d'inactivite avant reset (world boss : 45)
     wipeGrace   = <s>,             -- optionnel, delai hors combat avant wipe (raid/donjon 3, world 8)
+    idleTimeout = <s>,             -- optionnel, silence du boss avant de conclure au reset (15)
     phases      = { ... },         -- optionnel
     timers      = { ... },
 }
@@ -43,13 +44,14 @@ table indexée par nom casse dès qu'on sort d'un client EN.
 
 | `kind` | Engage | Fin de combat |
 |---|---|---|
-| `raid` | `ENCOUNTER_START`, unités `boss1..5`, combat log | `ENCOUNTER_END`, mort du (des) boss, plus personne du groupe en combat pendant 3 s |
+| `raid` | `ENCOUNTER_START`, unités `boss1..5`, combat log | `ENCOUNTER_END`, mort du (des) boss, tout le groupe mort, ou personne en combat pendant 3 s et boss muet 15 s ; solo : sortie de combat |
 | `dungeon` | idem | idem |
-| `world` | combat log, y compris quand **quelqu'un d'autre** tape le boss | mort, plus personne en combat pendant 8 s, ou boss inactif (rien lancé, rien subi) pendant 45 s = reset |
+| `world` | combat log, y compris quand **quelqu'un d'autre** tape le boss | mort, tout le groupe mort, personne en combat pendant 8 s et boss muet 15 s, ou boss inactif (rien lancé, rien subi) pendant 45 s = reset |
 
 Sans `kind`, la nature est déduite de l'instance où se trouve le joueur au
-moment de l'engage. Mourir ne termine jamais une rencontre : c'est le combat
-du groupe (et `IsEncounterInProgress` là où il existe) qui décide.
+moment de l'engage. Mourir ne termine jamais une rencontre tant que quelqu'un
+du groupe se bat : c'est le combat du groupe (et `IsEncounterInProgress` là où
+il existe) qui décide.
 
 ## Phases
 
