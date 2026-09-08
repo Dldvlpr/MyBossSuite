@@ -130,7 +130,7 @@ de l'écraser :
 
 | | |
 |---|---|
-| Réécrits à chaque passage | `repeatInterval`, `variable`, et le `time` des timers `PULL` |
+| Réécrits à chaque passage | `repeatInterval`, `variable`, et le `time` mesuré : celui des timers `PULL`, et celui des timers `PHASE` dont la borne a pu être située dans le log |
 | Conservés | tout le reste : le tableau `phases`, `trigger`, `phase`, `threshold`, `name`, `announce`, `flash`, `on`, `warnBefore`, `once`, `testTime`, `color`, `kind`, `zone`, `instanceId`… |
 | Conservés tels quels | les timers dont le sort est absent des logs de ce passage, signalés par un commentaire `-- conserve :` |
 | Ajoutés en fin de liste | les sorts jamais vus jusqu'ici, là où on les remarque |
@@ -141,18 +141,35 @@ non trivial.
 
 Ce qu'il faut savoir :
 
-- **Le tableau `phases` n'est jamais touché.** C'est la mécanique du combat,
-  pas une mesure : le générateur ne sait pas la produire et n'a pas le droit de
-  l'effacer.
-- **Seul un timer `PULL` reçoit le `time` mesuré**, parce que la mesure est un
-  delta depuis le pull. Un timer `PHASE` compte depuis l'entrée dans sa phase,
-  une origine que l'ingestion ne sait pas encore situer dans un log : son
-  `time` reste écrit à la main et le timer reste `provisional`. C'est ce qui
-  permet à un même sort de porter un timer par phase — Flame Breath en P1 et en
-  P3 — sans que la mesure de la P1 écrase le timing de la P3.
-- **La cadence, elle, ne dépend pas de l'origine** : `repeatInterval` et
-  `variable` sont réécrits sur tous les timers du sort, quelle que soit leur
-  phase.
+- **Un tableau `phases` existant n'est jamais touché.** C'est la mécanique du
+  combat, pas une mesure, et le générateur n'a pas le droit de l'effacer. Il le
+  *lit*, en revanche, pour situer les bornes de phase dans le log. Un fichier
+  qui n'en a aucun peut en recevoir une **proposition** issue des
+  `phaseTransitions` de WarcraftLogs, chaque entrée marquée `provisional = true`
+  et le déclencheur choisi sur la dissymétrie entre les logs (vie constante et
+  heures différentes ⇒ `HEALTH` ; heure constante et vies différentes ⇒
+  `PULL`). Une proposition demande une relecture, elle ne la remplace pas.
+- **Un timer `PHASE` n'est mesuré que si sa borne a été située.** L'ingestion
+  rejoue le déclencheur de la phase sur le log — seuil de vie sur la courbe de
+  vie du boss, cast déclencheur, délai `PULL`/`PHASE` — et compte alors les
+  casts depuis l'entrée dans la phase. Quand ça marche, le timer reçoit un
+  `time` mesuré et perd son `provisional` ; quand ça ne marche pas (déclencheur
+  `EMOTE`, dont le texte est localisé, ou trou dans la courbe de vie parce que
+  le boss était immunisé), la borne est déclarée inconnue et le `time` écrit à
+  la main reste intact. Y écrire le delta depuis le pull donnerait un chiffre
+  précis et faux. C'est ce qui permet à un même sort de porter un timer par
+  phase — Flame Breath en P1 et en P3 — chacun avec son propre timing.
+- **Un timer restreint à une phase prend la cadence de sa phase.** Pour un sort
+  présent en P1 et en P3, l'écart entre le dernier cast de la P1 et le premier
+  de la P3 est un trou, pas un intervalle : compté dans le tas, il fait passer
+  un timer parfaitement régulier pour du non déterministe. Un timer sans `phase`
+  déclarée garde la mesure globale.
+- **`-- TODO phase ?`** marque un sort dont le premier cast se disperse d'un log
+  à l'autre alors que sa cadence reste serrée : la signature d'un sort qui
+  attend une phase, pas d'une mécanique aléatoire. Le timer reste `provisional`,
+  le commentaire donne les deux écarts-types et, si une phase concentre les
+  observations, laquelle. Le générateur signale — convertir en `PHASE` demande
+  de savoir *quelle* phase, ce qu'un delta depuis le pull ne dit pas.
 - Un timer `PULL` qui reçoit une mesure perd son `provisional` : il n'est plus
   provisoire, il est mesuré.
 - Un timer basculé en `CAST`, `AURA`, `EMOTE` ou `DEATH` ne garde pas de
@@ -162,6 +179,10 @@ Ce qu'il faut savoir :
   mêmes mesures donnent le même octet.
 - Le bandeau de commentaires en tête appartient au générateur et est réécrit ;
   ce qui doit survivre va dans un champ, pas dans un commentaire.
+
+`--no-phases` renonce à situer les bornes : les timers `PHASE` gardent leur
+`time` écrit à la main et aucune proposition n'est faite. C'est aussi ce qui
+évite les requêtes de dégâts, les plus lourdes du passage.
 
 `--replace` écrase sans fusionner. Un fichier que le parseur ne sait pas relire
 arrête le passage **avant** tout appel API, plutôt que d'être écrasé.

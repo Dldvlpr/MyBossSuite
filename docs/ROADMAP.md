@@ -494,7 +494,8 @@ mod : la rencontre a une nature, un début, une fin qualifiée et des phases.
 - [ ] **Voix pour le compte à rebours** : fichiers son à produire ou à
       licencier. Le compte à rebours est texte.
 - [ ] **Data** : Onyxia, Kazzak et Herod sont des références de format ;
-      la couverture réelle vient de `tools/wcl-ingest` (`--kind`, `--zone`).
+      la couverture réelle vient de `tools/wcl-ingest` (`--kind`, `--zone`) et
+      demande `WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`.
 
 ---
 
@@ -507,9 +508,16 @@ Réordonné par rapport à la version initiale, pour deux raisons : le shim BigW
 - [ ] Client API : warcraftlogs.com/api/clients/ (OAuth, gratuit)
 - [ ] API v2 = GraphQL. Scriptable, donc pas limité à de la vérification ponctuelle.
 - [ ] `tools/wcl-ingest/` : pull de N logs par boss → deltas depuis le pull → **médiane** par spellId → génération du fichier `Data/<Flavor>/<Raid>/<Boss>.lua`.
-- [x] **Fusion à la régénération** (fait) : seuls `repeatInterval`, `variable` et le `time` des timers `PULL` sont réécrits. Le tableau `phases`, les timers `PHASE`/`CAST`/`AURA`, les libellés, `announce`, `flash` — tout ce qui s'écrit à la main — survit. Sans ça, éditer un fichier est jetable et un boss à phases n'est jamais régénérable : l'ingestion en masse s'arrête au premier boss non trivial. `--replace` écrase, un fichier illisible arrête le passage avant tout appel API.
-- [ ] **Proposition de phase** : le couple (écart-type du premier cast élevé, écart-type des intervalles serré) est la signature d'une capacité gated par une phase, pas d'une mécanique aléatoire. Aujourd'hui elle ressort en `variable = true` — cf. le commentaire de `VARIABLE_STDEV`, qui nomme déjà le cas. À convertir en `-- TODO phase ?` + `provisional`, le générateur signalant sans deviner.
-- [ ] **Origine des timers `PHASE`** : l'ingestion ne mesure qu'un delta depuis le pull, donc le `time` d'un timer `PHASE` reste écrit à la main et le timer reste `provisional`. Pour le mesurer il faut situer les bornes de phase dans le log : `phaseTransitions` (couverture à vérifier hors retail) ou la courbe de vie du boss — ni l'un ni l'autre n'est demandé par `FIGHT_QUERY`. C'est aussi ce qui permettrait de générer les entrées de `phases`, que `render_lua` n'émet pas (il ne sort que du `trigger = "PULL"`).
+- [x] **Fusion à la régénération** (fait) : seuls `repeatInterval`, `variable` et le `time` mesuré (timers `PULL`, et timers `PHASE` dont la borne a été située) sont réécrits. Le tableau `phases`, les timers `PHASE`/`CAST`/`AURA`, les libellés, `announce`, `flash` — tout ce qui s'écrit à la main — survit. Sans ça, éditer un fichier est jetable et un boss à phases n'est jamais régénérable : l'ingestion en masse s'arrête au premier boss non trivial. `--replace` écrase, un fichier illisible arrête le passage avant tout appel API.
+- [x] **Proposition de phase** (fait) : le couple (écart-type du premier cast élevé, écart-type des intervalles serré) est la signature d'une capacité gated par une phase, pas d'une mécanique aléatoire. Elle ne ressort plus en `variable = true` — qui dirait le contraire de ce qu'on a mesuré — mais en `-- TODO phase ?` + `provisional`, avec les deux écarts-types en commentaire et, quand une phase concentre les observations, laquelle. Le générateur signale sans deviner : convertir en `PHASE` demande de savoir *quelle* phase, ce qu'un delta depuis le pull ne dit pas.
+- [x] **Origine des timers `PHASE`** (fait) : `tools/wcl-ingest/wcl_phases.py` situe les bornes de phase dans le log, et les casts sont alors comptés depuis l'entrée dans leur phase. Un timer `PHASE` dont la borne a pu être située reçoit un `time` mesuré et perd son `provisional` ; sinon rien ne bouge et il reste écrit à la main.
+
+  Deux sources, dans cet ordre. **La data du boss elle-même** d'abord : le tableau `phases` dit déjà comment la phase se déclenche, il suffit de rejouer ce déclencheur sur le log — `HEALTH` sur la courbe de vie (reconstruite depuis les dégâts subis par le boss, filtrés côté serveur par `filterExpression`), `CAST` sur les casts déjà rapatriés, `PULL`/`PHASE` sur leur délai. C'est la source qui fait foi, parce que c'est exactement ce que le module fera en jeu. **`phaseTransitions`** ensuite, en secours, et seulement si son découpage compte autant de phases que la data : un mauvais alignement mesurerait précisément la mauvaise phase. La requête est séparée de `FIGHT_QUERY` exprès — sa couverture hors retail n'est pas garantie, et une absence se dégrade en « phase non située » au lieu de faire tomber l'ingestion.
+
+  Effet de bord qui vaut la peine : un sort présent dans deux phases voyait sa cadence polluée par le trou entre les deux (dernier cast de la P1 → premier de la P3), ce qui le faisait passer pour non déterministe. Un timer restreint à une phase prend maintenant la cadence de *sa* phase.
+
+  Ce qui reste non situable : un déclencheur `EMOTE` (texte localisé, non rejouable hors du jeu) et un franchissement de seuil tombé dans un trou de la courbe — le boss immunisé ne prend rien, donc sa vie n'est plus échantillonnée. Dans les deux cas la borne est déclarée inconnue, et un cast coincé entre deux bornes dont une manque n'est attribué à aucune phase.
+- [x] **Génération des entrées de `phases`** (fait) : un fichier qui n'a aucun tableau `phases` en reçoit une proposition depuis `phaseTransitions`, chaque entrée marquée `provisional = true`. Le déclencheur proposé sort de la dissymétrie entre les logs — vie constante et heures différentes ⇒ `HEALTH` + seuil médian ; heure constante et vies différentes ⇒ `PULL` + délai médian — et les chiffres qui l'ont fait retenir sont affichés. Un tableau `phases` déjà présent n'est **jamais** remplacé : c'est la mécanique du combat, pas une mesure.
 
 ```graphql
 query($code: String!, $fight: Int!) {

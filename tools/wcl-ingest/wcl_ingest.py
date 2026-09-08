@@ -53,12 +53,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wa-extract"))
 
 import lua_table  # noqa: E402
+import wcl_phases  # noqa: E402
 from wcl_api import (  # noqa: E402
     FLAVORS,
     WCLError,
     discover_reports,
     fetch_events,
     fetch_fight,
+    fetch_phase_transitions,
     get_token,
     parse_report_arg,
 )
@@ -71,18 +73,73 @@ VARIABLE_STDEV = 2.5
 # En dessous de ce nombre d'observations, on ne publie pas de repeatInterval.
 MIN_SAMPLES = 3
 
+# Signature d'une capacite gatee par une phase : le premier cast se disperse
+# d'un log a l'autre (la phase n'arrive pas a heure fixe) alors que la cadence,
+# elle, reste serree une fois la phase entamee. Une mecanique reellement
+# aleatoire disperse les deux. C'est la seule chose qui les distingue depuis un
+# delta depuis le pull, et elle ne conclut pas : elle signale.
+PHASE_INTERVAL_STDEV = 1.5
+
+# Au-dela de cette part des observations dans une meme phase, on nomme la phase
+# suspectee dans le commentaire. En dessous, on dit juste qu'il y a un doute.
+PHASE_HINT_SHARE = 0.6
+
 
 def fetch_casts(token: str, code: str, fight_id: int, start: float):
     return fetch_events(token, code, fight_id, start, "Casts", "Enemies")
+
+
+def fetch_boss_damage(token: str, code: str, fight_id: int, start: float, target_ids):
+    """Degats subis par le boss — c'est ce qui porte sa vie, donc sa courbe.
+
+    Le filtre est evalue par WCL : sans lui on rapatrie les degats de tout le
+    raid pour n'en garder qu'une cible. S'il est refuse, on retombe sur la
+    version non filtree plutot que de renoncer a la courbe.
+    """
+    expression = " or ".join("target.id = %d" % actor_id for actor_id in sorted(target_ids))
+    try:
+        return fetch_events(token, code, fight_id, start, "DamageDone", "Friendlies",
+                            expression or None)
+    except WCLError:
+        return fetch_events(token, code, fight_id, start, "DamageDone", "Friendlies")
+
+
+def needs_health_curve(phases) -> bool:
+    return any(phase.get("trigger") == "HEALTH" for phase in phases)
 
 
 # ----------------------------------------------------------------------------
 # Agregation
 # ----------------------------------------------------------------------------
 
-def collect(token: str, reports, npc_id: int | None, verbose: bool):
-    """Retourne { abilityGameID: {"firsts": [...], "intervals": [...], "name": str} }."""
-    stats = defaultdict(lambda: {"firsts": [], "intervals": [], "name": None})
+def deltas(times):
+    """Intervalles entre casts consecutifs, bornes pour ecarter le bruit.
+
+    Sous la seconde on regarde deux coups du meme cast (multi-cible), au-dela de
+    dix minutes on regarde deux phases sans rapport : ni l'un ni l'autre n'est
+    une cadence.
+    """
+    return [round(b - a, 2) for a, b in zip(times, times[1:]) if 1.0 < (b - a) < 600.0]
+
+
+def new_stat():
+    return {"firsts": [], "intervals": [],
+            "phases": defaultdict(lambda: {"firsts": [], "intervals": []})}
+
+
+def collect(token: str, reports, npc_id: int | None, verbose: bool,
+            phases=None, want_phases: bool = True):
+    """Retourne (stats, nombre de logs exploites, releve des phases).
+
+    `stats[abilityGameID]` porte les deltas depuis le pull, et — quand les
+    bornes de phase ont pu etre situees — les memes deltas comptes depuis
+    l'entree dans chaque phase. C'est cette seconde mesure qui rend un timer
+    `PHASE` mesurable au lieu de rester ecrit a la main.
+    """
+    phases = phases or []
+    stats = defaultdict(new_stat)
+    phase_report = {"transitions": defaultdict(list), "situated": defaultdict(int),
+                    "curve": 0, "asked": 0}
     used = 0
 
     for code, fight_id in reports:
@@ -118,14 +175,114 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool):
             times.sort()
             entry = stats[ability]
             entry["firsts"].append(times[0])
-            entry["intervals"].extend(
-                round(b - a, 2) for a, b in zip(times, times[1:]) if 1.0 < (b - a) < 600.0
-            )
+            entry["intervals"].extend(deltas(times))
+
+        bounds = {}
+        if want_phases:
+            bounds = situate_phases(token, code, fight_id, fight, actors, npc_id,
+                                    phases, by_ability, phase_report)
+            for index in bounds:
+                phase_report["situated"][index] += 1
+
+        if bounds and phases:
+            split_by_phase(stats, by_ability, bounds, len(phases))
 
         if verbose:
-            print(f"  + {code}:{fight_id} — {len(by_ability)} sort(s), pull {fight['name']}")
+            situated = ", ".join(str(index) for index in sorted(bounds)) or "aucune"
+            print(f"  + {code}:{fight_id} — {len(by_ability)} sort(s), pull {fight['name']}"
+                  f" ; phases situees : {situated}")
 
-    return stats, used
+    return stats, used, phase_report
+
+
+def situate_phases(token, code, fight_id, fight, actors, npc_id, phases,
+                   by_ability, phase_report):
+    """Bornes de phase d'un combat, et releve des transitions pour la proposition.
+
+    Aucun echec n'arrete l'ingestion : une phase non situee laisse simplement le
+    timer `PHASE` correspondant tel qu'il a ete ecrit a la main, ce qui est
+    exactement l'etat d'avant.
+    """
+    pull = float(fight["startTime"])
+    raw, names = fetch_phase_transitions(token, code, fight_id)
+    # Tout le module de phases raisonne en secondes depuis le pull, comme la
+    # courbe et les casts : la conversion se fait ici, une fois.
+    transitions = [(index, (timestamp - pull) / 1000.0) for index, timestamp in raw]
+
+    # La courbe de vie coute cher (les degats du raid entier avant filtrage) :
+    # on ne la demande que si quelque chose la lit — un seuil de vie a rejouer,
+    # ou une proposition de phases a etayer.
+    curve = []
+    if needs_health_curve(phases) or (not phases and transitions):
+        phase_report["asked"] += 1
+        # Sans npcId on ne sait pas qui filtrer : mieux vaut ne pas filtrer du
+        # tout que d'enumerer tous les acteurs du rapport dans l'expression.
+        target_ids = [actor_id for actor_id, actor in actors.items()
+                      if actor.get("gameID") == npc_id] if npc_id is not None else []
+        try:
+            damage = fetch_boss_damage(token, code, fight_id, pull, target_ids)
+            curve = wcl_phases.health_curve(damage, actors, npc_id, pull)
+        except (WCLError, urllib.error.URLError) as exc:
+            print(f"  ! {code}:{fight_id} : courbe de vie indisponible ({exc})",
+                  file=sys.stderr)
+        if curve:
+            phase_report["curve"] += 1
+
+    if not phases:
+        # Rien a situer, mais tout a relever : ces transitions sont la matiere
+        # de la proposition de `phases` pour un fichier qui n'en a pas encore.
+        for index, delta in transitions:
+            phase_report["transitions"][index].append((delta, wcl_phases.health_at(curve, delta)))
+        phase_report["names"] = names
+        return {}
+
+    return wcl_phases.phase_bounds(phases, curve, by_ability, transitions)
+
+
+def split_by_phase(stats, by_ability, bounds, phase_count: int):
+    """Repartit les casts par phase et recompte les deltas depuis chaque borne."""
+    for ability, times in by_ability.items():
+        per_phase = defaultdict(list)
+        for time in times:
+            index = wcl_phases.phase_of(bounds, phase_count, time)
+            if index is not None:
+                per_phase[index].append(time)
+        for index, phase_times in per_phase.items():
+            entry = stats[ability]["phases"][index]
+            entry["firsts"].append(round(phase_times[0] - bounds[index], 2))
+            entry["intervals"].extend(deltas(phase_times))
+
+
+def measure(firsts, intervals):
+    """Mediane des deltas + dispersion, la brique commune pull / phase."""
+    first = statistics.median(firsts)
+    first_stdev = statistics.pstdev(firsts) if len(firsts) > 1 else 0.0
+    interval = statistics.median(intervals) if len(intervals) >= MIN_SAMPLES else None
+    interval_stdev = statistics.pstdev(intervals) if len(intervals) > 1 else 0.0
+    return {
+        "time": round(first, 1),
+        "timeStdev": round(first_stdev, 2),
+        "repeatInterval": round(interval, 1) if interval else None,
+        "intervalStdev": round(interval_stdev, 2),
+        "samples": len(firsts),
+    }
+
+
+def phase_hint(phase_rows):
+    """Phase (>= 2) qui concentre les observations, ou None si elles se partagent.
+
+    Sert uniquement a nommer une piste dans un commentaire. Une majorite franche
+    est une indication ; une repartition equilibree n'en est pas une, et on
+    prefere alors ne rien nommer plutot que de designer au hasard.
+    """
+    if not phase_rows:
+        return None
+    total = sum(row["samples"] for row in phase_rows.values())
+    late = {index: row for index, row in phase_rows.items() if index >= 2}
+    if not total or not late:
+        return None
+    index, row = max(late.items(), key=lambda item: item[1]["samples"])
+    return index if row["samples"] / total >= PHASE_HINT_SHARE else None
 
 
 def summarise(stats, min_reports: int):
@@ -134,24 +291,28 @@ def summarise(stats, min_reports: int):
         firsts = entry["firsts"]
         if len(firsts) < min_reports:
             continue
-        first = statistics.median(firsts)
-        first_stdev = statistics.pstdev(firsts) if len(firsts) > 1 else 0.0
+        row = measure(firsts, entry["intervals"])
+        row["spellId"] = ability
 
-        intervals = entry["intervals"]
-        interval = statistics.median(intervals) if len(intervals) >= MIN_SAMPLES else None
-        interval_stdev = statistics.pstdev(intervals) if len(intervals) > 1 else 0.0
+        row["phases"] = {
+            index: measure(data["firsts"], data["intervals"])
+            for index, data in sorted(entry.get("phases", {}).items())
+            if len(data["firsts"]) >= min_reports
+        }
 
-        rows.append(
-            {
-                "spellId": ability,
-                "time": round(first, 1),
-                "timeStdev": round(first_stdev, 2),
-                "repeatInterval": round(interval, 1) if interval else None,
-                "intervalStdev": round(interval_stdev, 2),
-                "samples": len(firsts),
-                "variable": max(first_stdev, interval_stdev) > VARIABLE_STDEV,
-            }
-        )
+        # Un premier cast disperse alors que la cadence reste serree ne veut pas
+        # dire "timing aleatoire" : ca veut dire que le sort attend quelque chose
+        # — une phase — avant de partir, puis tourne comme une horloge. Le
+        # generateur le signale (`-- TODO phase ?` + `provisional`) au lieu de le
+        # noyer dans `variable`, qui dirait le contraire de ce qu'on a mesure.
+        tight_cadence = (row["repeatInterval"] is not None
+                         and row["intervalStdev"] <= PHASE_INTERVAL_STDEV)
+        row["phaseGated"] = row["timeStdev"] > VARIABLE_STDEV and tight_cadence
+        row["phaseHint"] = phase_hint(row["phases"]) if row["phaseGated"] else None
+        row["variable"] = (not row["phaseGated"]
+                           and max(row["timeStdev"], row["intervalStdev"]) > VARIABLE_STDEV)
+
+        rows.append(row)
     rows.sort(key=lambda row: row["time"])
     return rows
 
@@ -183,7 +344,7 @@ FIELD_ORDER = (
 PHASE_FIELD_ORDER = (
     "name", "trigger", "time", "threshold", "spellId", "castStart",
     "event", "pattern", "npcId", "alert", "difficulties",
-    "warnBefore", "bar", "color", "testTime",
+    "warnBefore", "bar", "color", "testTime", "provisional",
 )
 
 
@@ -257,6 +418,33 @@ def read_existing(path: Path, npc_id: int):
             "%s (offset %d)" % (exc.__class__.__name__, parser.pos)) from exc
 
 
+def applied_measure(timer: dict, row):
+    """Mesure qui s'applique a ce timer, et son origine.
+
+    Un timer `PHASE` compte depuis l'entree dans sa phase : il ne peut recevoir
+    que la mesure prise depuis cette borne-la, quand le log a permis de la
+    situer. Un timer restreint a une phase (`phase = n`) prend lui aussi la
+    mesure de cette phase : sinon sa cadence melange deux phases. Flame Breath
+    revient toutes les 25 s en P1 puis toutes les 25 s en P3, mais l'ecart entre
+    le dernier cast de la P1 et le premier de la P3 est un trou de 70 s, pas un
+    intervalle — compte dans le tas, il fait passer un timer parfaitement regulier
+    pour du non deterministe.
+
+    Cette fonction est le seul endroit ou ce choix se fait : la fusion et le
+    commentaire emis doivent parler de la meme mesure, sinon le fichier documente
+    autre chose que ce qu'il porte.
+    """
+    if row is None:
+        return None, None
+    measured = (row.get("phases") or {}).get(timer.get("phase"))
+    if timer.get("trigger") == "PHASE":
+        # Sans borne situee, rien ne s'applique : son `time` reste ecrit a la main.
+        return (measured, "phase %s" % timer.get("phase")) if measured else (None, None)
+    if measured is not None:
+        return measured, "phase %s" % timer.get("phase")
+    return row, "pull"
+
+
 def merge_timer(existing: dict, row):
     """Reecrit les champs mesures d'un timer, conserve tout le reste."""
     merged = dict(existing)
@@ -264,32 +452,62 @@ def merge_timer(existing: dict, row):
         return merged
 
     trigger = merged.get("trigger", "PULL")
+    source, origin = applied_measure(merged, row)
+    # `source` peut etre la mesure globale : ce qui distingue les deux cas, c'est
+    # l'origine, pas la presence d'une mesure.
+    from_phase = origin is not None and origin != "pull"
 
     if trigger == "PULL":
         # Ce qu'on mesure est un delta depuis le pull : ca ne s'ecrit que dans
-        # un timer qui compte depuis le pull.
-        merged["time"] = row["time"]
-        merged.pop("provisional", None)
+        # un timer qui compte depuis le pull. La phase 1 commence au pull, donc
+        # sa mesure a la meme origine — elle est juste mieux isolee.
+        merged["time"] = source["time"]
+        if row.get("phaseGated") and not from_phase:
+            # Mesure suspecte : le sort a l'air d'attendre une phase. On garde
+            # le chiffre — c'est le meilleur qu'on ait — mais le timer reste
+            # provisoire et le commentaire emis dit quoi verifier.
+            merged["provisional"] = True
+        else:
+            merged.pop("provisional", None)
     elif trigger == "PHASE":
-        # Compte depuis l'entree dans sa phase — une origine que l'ingestion ne
-        # sait pas encore situer dans un log. Y ecrire le delta depuis le pull
-        # donnerait un chiffre precis et faux, donc `time` reste ecrit a la main
-        # et le timer reste provisoire. Un meme sort porte souvent un timer par
-        # phase (Flame Breath en P1 et en P3) : sans cette distinction, la
-        # mesure de la P1 ecraserait le timing de la P3.
-        pass
+        # Compte depuis l'entree dans sa phase. Quand la borne a pu etre situee
+        # dans le log (seuil de vie rejoue, cast declencheur, `phaseTransitions`),
+        # le delta est mesurable et le timer cesse d'etre provisoire. Sinon son
+        # `time` reste celui ecrit a la main : y ecrire le delta depuis le pull
+        # donnerait un chiffre precis et faux. Un meme sort porte souvent un
+        # timer par phase (Flame Breath en P1 et en P3) : c'est cette distinction
+        # qui empeche la mesure de la P1 d'ecraser le timing de la P3.
+        if source is not None:
+            merged["time"] = source["time"]
+            merged.pop("provisional", None)
     else:
         merged.pop("time", None)
 
-    # La cadence, elle, ne depend pas de l'origine : un sort relance toutes les
-    # 22 s les relance toutes les 22 s dans n'importe quelle phase.
-    if row["repeatInterval"]:
-        merged["repeatInterval"] = row["repeatInterval"]
-    if row["variable"]:
+    # Cadence et dispersion viennent de la meme mesure que le `time` : melanger
+    # une cadence de phase et une dispersion globale ferait dire au fichier le
+    # contraire de ce qu'on a mesure.
+    # Timer PHASE dont la borne manque : sa cadence n'est pas mesurable a part,
+    # on retombe sur la mesure globale — c'est la seule qu'on ait.
+    cadence = source or row
+    if cadence["repeatInterval"]:
+        merged["repeatInterval"] = cadence["repeatInterval"]
+    if is_variable(cadence):
         merged["variable"] = True
     else:
         merged.pop("variable", None)
     return merged
+
+
+def is_variable(source) -> bool:
+    """Timing non deterministe : les deux dispersions sont larges.
+
+    Sur la mesure globale le drapeau est deja calcule (il tient compte de la
+    piste "phase") ; sur une mesure de phase il se recalcule ici, sur les seuls
+    chiffres de cette phase.
+    """
+    if "variable" in source:
+        return source["variable"]
+    return max(source["timeStdev"], source["intervalStdev"]) > VARIABLE_STDEV
 
 
 def new_timer(row):
@@ -298,6 +516,8 @@ def new_timer(row):
         timer["repeatInterval"] = row["repeatInterval"]
     if row["variable"]:
         timer["variable"] = True
+    if row.get("phaseGated"):
+        timer["provisional"] = True
     return timer
 
 
@@ -325,12 +545,15 @@ def merge_timers(existing_timers, rows):
     return merged
 
 
-def merge_header(args, existing):
+def merge_header(args, existing, proposed_phases=None):
     """Champs de tete du boss : la CLI tranche, l'existant comble le reste.
 
-    `phases` passe par ici sans y toucher : c'est devenu le champ le plus
-    manuel du format — la mecanique du combat, pas une mesure — et donc celui
-    qu'une regeneration ne doit surtout pas perdre.
+    Un tableau `phases` deja present passe par ici sans y toucher : c'est le
+    champ le plus manuel du format — la mecanique du combat, pas une mesure — et
+    donc celui qu'une regeneration ne doit surtout pas perdre. Une proposition
+    n'est ecrite que dans le cas ou il n'y en a aucun, et chaque entree proposee
+    porte `provisional = true` : elle demande une relecture, elle ne la remplace
+    pas.
     """
     header = dict(existing) if existing else {}
     header.pop("timers", None)
@@ -342,6 +565,8 @@ def merge_header(args, existing):
         header["zone"] = args.zone
     if "flavors" not in header:
         header["flavors"] = {args.flavor: True}
+    if proposed_phases and not header.get("phases"):
+        header["phases"] = {index: phase for index, phase in enumerate(proposed_phases, 1)}
     return header
 
 
@@ -358,10 +583,29 @@ HEADER_ORDER = (
 def render_timer(timer, row, merged_existing: bool):
     lines = []
     if row is not None:
-        lines.append(
-            "        -- %d log(s), sigma pull %ss / interval %ss"
-            % (row["samples"], row["timeStdev"], row["intervalStdev"])
-        )
+        source, origin = applied_measure(timer, row)
+        if source is not None:
+            lines.append(
+                "        -- %d log(s), sigma %s %ss / interval %ss"
+                % (source["samples"], origin, source["timeStdev"],
+                   source["intervalStdev"])
+            )
+        else:
+            # Timer PHASE dont la borne n'a pas ete situee : le dire, plutot que
+            # d'afficher la dispersion depuis le pull, qui ne le concerne pas.
+            lines.append(
+                "        -- phase %s non situee dans ces logs : `time` reste ecrit"
+                " a la main" % timer.get("phase", "?")
+            )
+        if row.get("phaseGated") and origin == "pull" and timer.get("trigger") == "PULL":
+            # Le generateur signale, il ne tranche pas : convertir en `PHASE`
+            # demande de savoir QUELLE phase, ce qu'un delta depuis le pull ne
+            # dit pas. Il dit en revanche precisement pourquoi il doute.
+            hint = (" — vu surtout en phase %d" % row["phaseHint"]) if row.get("phaseHint") else ""
+            lines.append(
+                "        -- TODO phase ? premier cast disperse (sigma %ss) mais cadence"
+                " serree (sigma %ss)%s" % (row["timeStdev"], row["intervalStdev"], hint)
+            )
     elif merged_existing:
         what = ("spell %d absent des logs de ce passage" % timer["spellId"]
                 if timer.get("spellId") else "entree ecrite a la main")
@@ -387,11 +631,17 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
         "-- Les timers marques `variable` ont un ecart-type eleve : mecanique non",
         "-- deterministe, la barre s'affiche comme incertaine.",
         "--",
-        "-- Regeneration : seuls `repeatInterval`, `variable` et le `time` des timers",
-        "-- PULL sont reecrits — le `time` d'un timer PHASE compte depuis l'entree",
-        "-- dans sa phase, que l'ingestion ne sait pas situer. Phases, seuils,",
-        "-- libelles, annonces et tout autre champ ecrit a la main sont conserves :",
-        "-- editer ce fichier est sur, relancer l'ingestion ne les effacera pas.",
+        "-- Un timer PHASE compte depuis l'entree dans sa phase : il n'est mesure que",
+        "-- si cette borne a pu etre situee dans le log (seuil de vie rejoue, cast",
+        "-- declencheur, phaseTransitions). Sinon son `time` reste ecrit a la main et",
+        "-- il reste `provisional`. Meme mot sur une phase : entree proposee, a relire.",
+        "-- `-- TODO phase ?` marque un sort dont le premier cast se disperse alors que",
+        "-- sa cadence est serree : la signature d'un sort qui attend une phase.",
+        "--",
+        "-- Regeneration : seuls `repeatInterval`, `variable` et le `time` mesure sont",
+        "-- reecrits. Phases, seuils, libelles, annonces et tout autre champ ecrit a la",
+        "-- main sont conserves : editer ce fichier est sur, relancer l'ingestion ne les",
+        "-- effacera pas.",
         "",
         "local _, ns = ...",
         "",
@@ -448,9 +698,50 @@ def parse_args(argv=None):
     parser.add_argument("--replace", action="store_true",
                         help="ecrase le fichier existant au lieu de le fusionner "
                              "(perd phases, seuils et libelles ecrits a la main)")
+    parser.add_argument("--no-phases", dest="phases", action="store_false",
+                        help="n'essaie pas de situer les bornes de phase : les timers "
+                             "PHASE gardent leur `time` ecrit a la main et aucune "
+                             "proposition n'est faite. Economise les requetes de degats.")
     parser.add_argument("--dry-run", action="store_true", help="affiche les stats sans ecrire de fichier")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
+
+
+def report_phases(phase_report, existing_phases, used: int, args):
+    """Rend compte des bornes situees, et propose un `phases` s'il n'y en a pas.
+
+    Ce que l'operateur doit pouvoir lire en une ligne : est-ce que cette passe a
+    rendu les timers PHASE mesurables, ou est-ce qu'ils restent ecrits a la main.
+    Une phase situee dans deux logs sur dix ne vaut pas une phase situee partout,
+    et le silence sur ce point ferait passer une mesure fragile pour un fait.
+    """
+    if not args.phases:
+        return None
+
+    if existing_phases:
+        situated = phase_report["situated"]
+        if not situated:
+            print("aucune borne de phase situee : les timers PHASE gardent leur "
+                  "`time` ecrit a la main.")
+            return None
+        detail = ", ".join("phase %d dans %d/%d log(s)" % (index, situated[index], used)
+                           for index in sorted(situated) if index >= 2)
+        print("bornes de phase situees : %s." % (detail or "phase 1 seulement (le pull)"))
+        return None
+
+    samples = phase_report["transitions"]
+    if not samples:
+        return None
+
+    proposed, notes = wcl_phases.propose_phases(samples, phase_report.get("names"))
+    if len(proposed) < 2:
+        return None
+    print("aucun tableau `phases` dans le fichier : %d phase(s) proposee(s) depuis "
+          "phaseTransitions, marquees `provisional` — a relire avant de s'en servir."
+          % (len(proposed) - 1))
+    for note in notes:
+        print(note)
+    return proposed
 
 
 def resolve_out(args) -> Path:
@@ -512,8 +803,11 @@ def main(argv=None) -> int:
         print("aucun log a analyser : passe --report CODE:FIGHT ou --encounter <id>.", file=sys.stderr)
         return 2
 
+    existing_phases = lua_array(existing.get("phases") or {}) if existing else []
+
     print(f"analyse de {len(reports)} log(s)...")
-    stats, used = collect(token, reports, args.npc_id, args.verbose)
+    stats, used, phase_report = collect(token, reports, args.npc_id, args.verbose,
+                                        existing_phases, args.phases)
     if used == 0:
         print("aucun log exploitable (npcId correct ?).", file=sys.stderr)
         return 1
@@ -522,6 +816,8 @@ def main(argv=None) -> int:
     if not rows:
         print("aucun sort retenu : baisse --min-reports.", file=sys.stderr)
         return 1
+
+    proposed = report_phases(phase_report, existing_phases, used, args)
 
     existing_timers = lua_array(existing.get("timers") or {}) if existing else []
     if existing_timers:
@@ -532,11 +828,16 @@ def main(argv=None) -> int:
     print(f"{len(rows)} sort(s) retenu(s) sur {used} log(s) :")
     for row in rows:
         flag = " [variable]" if row["variable"] else ""
+        if row["phaseGated"]:
+            hint = f" {row['phaseHint']} ?" if row["phaseHint"] else ""
+            flag = f" [TODO phase{hint}]"
         interval = f", toutes les {row['repeatInterval']}s" if row["repeatInterval"] else ""
-        print(f"  spell {row['spellId']:>7} : pull +{row['time']}s{interval}"
+        measured = "".join(f", phase {index} +{data['time']}s"
+                           for index, data in sorted(row["phases"].items()) if index >= 2)
+        print(f"  spell {row['spellId']:>7} : pull +{row['time']}s{interval}{measured}"
               f" ({row['samples']} log(s)){flag}")
 
-    lua = render_lua(args, merge_header(args, existing),
+    lua = render_lua(args, merge_header(args, existing, proposed),
                      merge_timers(existing_timers, rows), encounter_name, used)
     if args.dry_run:
         print()

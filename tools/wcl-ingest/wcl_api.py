@@ -96,7 +96,7 @@ query($code: String!, $fight: Int!) {
 # variables : ce sont des enums GraphQL, pas des String, et les parametrer
 # demanderait une query par combinaison.
 EVENTS_QUERY = """
-query($code: String!, $fight: Int!, $start: Float) {
+query($code: String!, $fight: Int!, $start: Float, $filter: String) {
   reportData {
     report(code: $code) {
       events(
@@ -104,10 +104,32 @@ query($code: String!, $fight: Int!, $start: Float) {
         hostilityType: %(hostility)s
         fightIDs: [$fight]
         startTime: $start
+        filterExpression: $filter
         limit: 10000
       ) {
         data
         nextPageTimestamp
+      }
+    }
+  }
+}
+"""
+
+# Bornes de phase telles que WarcraftLogs les a segmentees. Requete separee de
+# FIGHT_QUERY expres : la couverture de `phaseTransitions` hors retail n'est pas
+# garantie, et une ingestion classic ne doit pas tomber parce qu'un champ
+# facultatif manque. Ici l'echec se degrade en "phases non situees".
+PHASES_QUERY = """
+query($code: String!, $fight: Int!) {
+  reportData {
+    report(code: $code) {
+      fights(fightIDs: [$fight]) {
+        id
+        phaseTransitions { id startTime }
+      }
+      phases {
+        encounterID
+        phases { id name isIntermission }
       }
     }
   }
@@ -148,16 +170,53 @@ def fetch_fight(token: str, code: str, fight_id: int):
 
 
 def fetch_events(token: str, code: str, fight_id: int, start: float,
-                 data_type: str, hostility: str = "Enemies"):
-    """Pagine `events` jusqu'au bout — un pull long depasse la limite d'une page."""
+                 data_type: str, hostility: str = "Enemies",
+                 filter_expression: str | None = None):
+    """Pagine `events` jusqu'au bout — un pull long depasse la limite d'une page.
+
+    `filter_expression` est evalue par WCL, donc il economise le transfert et
+    pas seulement le traitement : sur les degats d'un raid entier, la difference
+    entre tout rapatrier et ne demander que la cible utile se compte en dizaines
+    de pages.
+    """
     query = EVENTS_QUERY % {"data_type": data_type, "hostility": hostility}
     events, cursor = [], start
     while cursor is not None:
-        data = graphql(token, query, {"code": code, "fight": fight_id, "start": cursor})
+        data = graphql(token, query, {"code": code, "fight": fight_id,
+                                      "start": cursor, "filter": filter_expression})
         block = data["reportData"]["report"]["events"]
         events.extend(block["data"] or [])
         cursor = block.get("nextPageTimestamp")
     return events
+
+
+def fetch_phase_transitions(token: str, code: str, fight_id: int):
+    """Retourne ([(id de phase, startTime ms), ...], {id: nom}).
+
+    Ne leve jamais : `phaseTransitions` est renseigne par WarcraftLogs sur les
+    rencontres qu'il sait decouper, ce qui n'est pas le cas partout hors retail.
+    Une absence n'est pas une erreur, c'est juste une source en moins — la
+    detection par la data du boss (seuils de vie, casts) prend alors le relais.
+    """
+    try:
+        data = graphql(token, PHASES_QUERY, {"code": code, "fight": fight_id})
+    except (WCLError, urllib.error.URLError):
+        return [], {}
+    report = data.get("reportData", {}).get("report") or {}
+    fights = report.get("fights") or []
+    if not fights:
+        return [], {}
+    transitions = [
+        (int(t["id"]), float(t["startTime"]))
+        for t in (fights[0].get("phaseTransitions") or [])
+    ]
+    transitions.sort(key=lambda item: item[1])
+
+    names = {}
+    for entry in (report.get("phases") or []):
+        for phase in (entry.get("phases") or []):
+            names.setdefault(int(phase["id"]), phase.get("name"))
+    return transitions, names
 
 
 def parse_report_arg(item: str):

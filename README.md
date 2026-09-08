@@ -16,7 +16,7 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 2 | Runtime engine boss timer | fait |
 | 2b | Rencontres : world boss, donjon, raid ; phases, annonces, wipe/kill | fait |
 | 2c | Synchronisation entre joueurs (pull, phases, kill) | fait |
-| 3a | `tools/wcl-ingest` (WarcraftLogs) | outil écrit, **data à générer** |
+| 3a | `tools/wcl-ingest` (WarcraftLogs), bornes de phase comprises | outil écrit, **data à générer** |
 | 3b | `tools/wa-extract` (WeakAuras perso) | outil écrit |
 | 3c | Extraction depuis DBM/BigWigs | non fait — décision de licence à trancher |
 | 4 | Module Swing Timer | fait |
@@ -304,11 +304,27 @@ tools/wcl-ingest/wcl_alerts.py --help    # sorts kickables + zones à fuir
 tools/wa-extract/wa_extract.py count WeakAuras.lua
 ```
 
+Le `WeakAuras.lua` est dans
+`WTF/Account/<COMPTE>/SavedVariables/WeakAuras.lua`.
+
 * **`wcl-ingest`** — source principale de timings. OAuth client credentials
   (`WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`), API GraphQL v2, médiane des deltas
   depuis le pull, écart-type élevé ⇒ `variable = true` (barre affichée comme
   incertaine plutôt que faussement précise). Les timings mesurés sont des faits,
   pas une œuvre dérivée : aucune contrainte de licence.
+  Il **situe aussi les bornes de phase** dans le log, ce qui rend mesurable ce
+  qui ne l'était pas : un timer `PHASE` compte depuis l'entrée dans sa phase, pas
+  depuis le pull. Le déclencheur écrit dans `phases` est rejoué sur le log —
+  seuil de vie sur la courbe de vie du boss (reconstruite depuis les dégâts qu'il
+  encaisse), cast déclencheur, délai — et `phaseTransitions` sert de secours
+  quand son découpage compte autant de phases que la data. Une borne non située
+  (emote localisé, boss immunisé donc courbe trouée) laisse le `time` écrit à la
+  main intact : le générateur préfère ne rien dire à dire un chiffre précis et
+  faux. Effet de bord utile : un sort présent dans deux phases ne se fait plus
+  marquer `variable` par le trou entre les deux.
+  Quand la dispersion du premier cast est forte mais la cadence serrée, il écrit
+  `-- TODO phase ?` + `provisional` plutôt que `variable` : c'est la signature
+  d'un sort qui attend une phase, et le générateur signale sans deviner laquelle.
 * **`wcl-alerts`** (`wcl_alerts.py`) — les deux listes des modules d'alerte, en
   un seul passage sur les mêmes logs. **Deux natures de preuve, pas une** : un
   sort qui apparaît en `extraAbilityGameID` d'un événement `interrupt` *a été*
@@ -329,6 +345,8 @@ tools/wa-extract/wa_extract.py count WeakAuras.lua
 tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion + .toc
 ```
 
+Prérequis : `lua5.1` (ou `lua`) et `python3` dans le `PATH`.
+
 La suite charge le vrai code dans un mock d'API WoW et pilote le temps à la
 main : elle vérifie le socle et les quatre modules sur client classic **et**
 retail, avec et sans `C_Timer`. Le moteur de rencontre y est joué de bout en
@@ -345,6 +363,20 @@ Classic Era de `UnitCastingInfo`, handler d'event en erreur.
 
 Les numéros `## Interface` des six `.toc` sont dans `tools/gen-toc.sh` ; ils
 sont à bumper à chaque patch client, sinon l'addon apparaît comme obsolète.
+
+`tests/test_wcl_phases.py` teste la **mesure des timers `PHASE`** : courbe de vie
+reconstruite, seuil non daté quand la courbe a un trou, cast déclencheur cherché
+après la borne précédente, cast coincé entre deux bornes dont une manque écarté
+plutôt qu'attribué, et `phaseTransitions` refusé quand son découpage ne compte
+pas comme la data. Ce qui est en jeu : une borne mal située produirait des
+timings précis et faux, ce qui est pire que le `provisional` qu'elle remplace.
+
+`tests/test_wa_extract.py` teste l'inventaire des WeakAuras sur une fixture qui
+reproduit ce qui casse un parseur naïf : les deux schémas de trigger (`trigger`
+et `triggers[n]`), des nombres négatifs et scientifiques, et du code utilisateur
+stocké comme chaîne — accolades et guillemets échappés compris. C'est `count` qui
+décide si la phase 3b vaut le code qu'elle demande : une réponse fausse à cette
+question fait écrire, ou abandonner, une source de data pour rien.
 
 `tests/test_wcl_alerts.py` teste séparément le **classement** de l'ingestion, sur
 des logs synthétiques et sans réseau : une zone au sol doit être retenue, un DoT,
