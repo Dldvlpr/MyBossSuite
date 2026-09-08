@@ -342,7 +342,7 @@ FIELD_ORDER = (
     "threshold", "pattern", "npcId", "on", "event",
     "name", "difficulties", "repeatInterval", "warnBefore", "once",
     "announce", "countdown", "flash", "bar", "variable", "pendingWindow",
-    "testTime", "color", "icon", "key", "provisional",
+    "testTime", "color", "icon", "key", "source", "provisional",
 )
 
 # Ordre d'emission d'une entree de `phases`. Meme raison.
@@ -594,8 +594,10 @@ HEADER_ORDER = (
 )
 
 
-def render_timer(timer, row, merged_existing: bool):
-    lines = []
+def render_timer(timer, row, merged_existing: bool, notes=None):
+    # `notes` : commentaires fournis par l'appelant (bossmod-extract dit d'ou
+    # vient une entree). Ils passent avant ceux que la mesure ecrit elle-meme.
+    lines = list(notes or [])
     if row is not None:
         source, origin = applied_measure(timer, row)
         if source is not None:
@@ -640,9 +642,19 @@ def render_timer(timer, row, merged_existing: bool):
     return lines
 
 
-def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> str:
-    merged_existing = any(row is None for _, row in timers)
-    lines = [
+def render_lua(args, header, timers, encounter_name: str = "", used_reports: int = 0,
+               banner=None, notes=None) -> str:
+    """Emission d'un fichier de data.
+
+    `banner` remplace l'en-tete de commentaires (un autre outil ecrit ce fichier
+    et doit dire lequel), `notes` ajoute des commentaires par timer, indexes sur
+    leur position. Les deux outils partagent cet emetteur exprès : deux formats
+    differents feraient un faux diff geant a chaque fois qu'on passe de l'un a
+    l'autre, et on cesserait de relire les vrais.
+    """
+    merged_existing = banner is None and any(row is None for _, row in timers)
+    notes = notes or {}
+    lines = list(banner) if banner else [
         "-- %s — flavor %s (npcId %d)" % (args.boss, args.flavor, args.npc_id),
         "--",
         "-- GENERE PAR tools/wcl-ingest/wcl_ingest.py — mediane des deltas mesures.",
@@ -666,11 +678,8 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
         "-- reecrits. Phases, seuils, libelles, annonces et tout autre champ ecrit a la",
         "-- main sont conserves : editer ce fichier est sur, relancer l'ingestion ne les",
         "-- effacera pas.",
-        "",
-        "local _, ns = ...",
-        "",
-        "ns.BossTimerData[%d] = {" % args.npc_id,
     ]
+    lines += ["", "local _, ns = ...", "", "ns.BossTimerData[%d] = {" % args.npc_id]
 
     keys = ordered_keys(header, HEADER_ORDER)
     width = max([len(k) for k in keys] + [len("timers")])
@@ -686,8 +695,8 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
             lines.append("    %-*s = %s," % (width, key, lua_value(header[key])))
 
     lines.append("    %-*s = {" % (width, "timers"))
-    for timer, row in timers:
-        lines.extend(render_timer(timer, row, merged_existing))
+    for index, (timer, row) in enumerate(timers):
+        lines.extend(render_timer(timer, row, merged_existing, notes.get(index)))
     lines += ["    },", "}", ""]
 
     encounter_id = header.get("encounterId")

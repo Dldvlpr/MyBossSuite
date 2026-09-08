@@ -6,8 +6,9 @@
 #   4. fusion a la regeneration (la data ecrite a la main doit survivre)
 #   5. bornes de phase (une mesure fausse serait pire que pas de mesure)
 #   6. identifiants WCL (.env et environnement, priorite et parsing)
-#   7. inventaire WeakAuras (c'est lui qui decide si la phase 3b vaut le coup)
-#   8. .toc a jour vis-a-vis de tools/gen-toc.sh
+#   7. releve des boss mods installes (ce que le parseur doit refuser)
+#   8. inventaire WeakAuras (c'est lui qui decide si la phase 3b vaut le coup)
+#   9. .toc a jour vis-a-vis de tools/gen-toc.sh
 #
 # Prerequis : lua5.1 (ou lua) et python3 dans le PATH.
 
@@ -98,6 +99,15 @@ fi
 echo
 echo "== ingestion WCL (identifiants : .env et environnement)"
 if output=$(python3 tests/test_wcl_env.py 2>&1); then
+    echo "  ok   $(printf '%s' "$output" | tail -n 1)"
+else
+    printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
+    status=1
+fi
+
+echo
+echo "== boss mods installes (parsing, sans WoW)"
+if output=$(python3 tests/test_bossmod_extract.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'

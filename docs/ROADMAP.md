@@ -572,7 +572,18 @@ Aucun des deux n'accorde de droit de dériver hors de son propre dépôt. Passer
 
 La seule porte qui reste est explicitement nommée par BigWigs : *demander*. Une autorisation écrite des auteurs, pour un usage précis. Tant qu'elle n'existe pas, WCL est la source unique — ce qui ne change rien au plan réel, puisque 3a est de toute façon la seule source qui donne de la data **par version de jeu**.
 
-Ordre par boss : **3a** → 3b si une aura `EVENT` existe déjà et couvre le cas → 3c uniquement avec une autorisation écrite.
+**Décision, 2026-09-08 : 3c rouvre, sous une forme étroite** — `tools/bossmod-extract/`. Le raisonnement qui la rouvre : une durée n'est pas une œuvre. « Onyxia souffle toutes les 25 s » est un fait constaté sur le jeu de Blizzard, et le droit d'auteur ne protège pas les faits, même coûteux à obtenir (*Feist*, 1991). Ni DBM ni BigWigs ne détiennent la mécanique, ils l'ont mesurée comme n'importe qui peut la mesurer.
+
+Ce que ce raisonnement ne couvre pas, et qui décide donc de la **forme** de l'outil : le droit *sui generis* des bases de données (dir. 96/9/CE, art. L341-1 CPI) protège l'investissement dans l'obtention et la vérification d'un ensemble, indépendamment de l'originalité, et interdit l'extraction d'une partie substantielle. La ligne retenue :
+
+* on ne reprend **que des nombres** — jamais un libellé, un texte d'annonce, une structure de phases, une ligne de leur code ;
+* on **remplit des trous** : une valeur mesurée par `wcl-ingest`, écrite à la main, ou une fenêtre `pendingWindow` ne sont jamais remplacées. L'outil ne peut donc pas produire une copie de leur base, seulement compléter la nôtre ;
+* chaque valeur importée porte `source` et `provisional` : la provenance est dans le fichier, et la trajectoire prévue est qu'elle disparaisse au premier passage de `wcl-ingest` sur des logs réels ;
+* rien n'est publié comme mesuré alors qu'il ne l'est pas.
+
+Ce que ça vaut en pratique reste borné : ces durées sont un point de départ pour un boss jamais mesuré, pas une source. **3a reste la source.** L'autorisation écrite, elle, reste la seule voie propre pour aller plus loin, et l'invitation de BigWigs (« please ask us ») tient toujours.
+
+Ordre par boss : **3a** → 3b si une aura `EVENT` existe déjà et couvre le cas → 3c pour amorcer un boss que personne n'a encore mesuré.
 
 ---
 

@@ -433,6 +433,42 @@ Le `WeakAuras.lua` est dans
   Quand la dispersion du premier cast est forte mais la cadence serrée, il écrit
   `-- TODO phase ?` + `provisional` plutôt que `variable` : c'est la signature
   d'un sort qui attend une phase, et le générateur signale sans deviner laquelle.
+* **`bossmod-extract`** (`bossmod_extract.py`) — relève ce que les boss mods
+  **installés chez toi** déclarent en clair, et s'en sert pour **remplir les
+  trous** de ta data. Trois modes : `scan` (ce que tu as installé), `report` (ce
+  qu'ils ont et que tu n'as pas), `write [--dry-run]` (fusion).
+
+  Ce qu'il lit : chez DBM, les durées passées aux constructeurs de timers
+  (`NewCDTimer`, `NewNextTimer`, `NewBerserkTimer`…) ; chez BigWigs, les
+  `self:Bar` / `self:CDBar` enfouis dans les handlers — l'approche shim +
+  `dofile` échouait là-dessus, un parsing statique non, et `args.spellId` se
+  résout par le `self:Log` qui a enregistré le handler.
+
+  Ce qu'il **refuse** : un temps d'incantation négatif (`-4` = « prends celui du
+  sort »), une durée conditionnelle (`self:Mythic() and 22 or 26`), un timer
+  sans `spellId`, un `:Start(12 - delay)` qui est un offset et pas une cadence.
+  Prendre une valeur de trop est bien pire que d'en rater une : elle ressort en
+  jeu comme une barre qui ment, sans qu'on sache d'où elle vient.
+
+  Ce qu'il écrit : des `repeatInterval` sur des triggers `CAST`, jamais des
+  timers `PULL` — un boss mod ne connaît pas de délai depuis le pull, ses barres
+  partent sur un événement. L'enrage est la seule exception, et c'en est une
+  vraie. Une fourchette DBM (`"20-30"`) devient `variable = true`, ce qui dit
+  exactement la même chose.
+
+  **La règle qui protège ton travail : il remplit des trous, il n'écrase jamais.**
+  Une cadence mesurée par `wcl-ingest`, un libellé, une annonce, une fenêtre
+  `pendingWindow` ne sont jamais remplacés. Chaque valeur importée porte
+  `source = "<addon>"` et `provisional = true` : elle ne vient pas de tes logs,
+  et `wcl-ingest` la remesurera.
+
+  Sur la licence : DBM et BigWigs sont `All Rights Reserved` et ne concèdent
+  aucun droit de dérivation, mais une durée constatée sur le jeu de Blizzard est
+  un **fait**, non protégeable comme tel. La limite est ailleurs — une extraction
+  systématique toucherait à la *compilation* (droit sui generis des bases de
+  données, art. L341-1 CPI). D'où la forme de l'outil : rien que des nombres,
+  aucun libellé repris, aucun écrasement, et la provenance inscrite dans le
+  fichier. Voir `docs/ROADMAP.md` phase 3c.
 * **`wcl-alerts`** (`wcl_alerts.py`) — les deux listes des modules d'alerte, en
   un seul passage sur les mêmes logs. **Deux natures de preuve, pas une** : un
   sort qui apparaît en `extraAbilityGameID` d'un événement `interrupt` *a été*
