@@ -6,12 +6,29 @@
 ## SavedVariables: MyBossSuiteDB
 ## SavedVariablesPerCharacter: MyBossSuiteCharDB
 ## X-Flavor: retail
+## X-License: GPL-3.0-or-later
 
 # ATTENTION : fichier genere par tools/gen-toc.sh — ne pas editer a la main.
 #
 # L'ordre de load est le seul mecanisme de dependance qui existe :
 # Compat -> Scheduler -> EventBus -> Comm -> DB -> Anchors -> Bars -> Alerts -> Config -> ModuleLoader -> Modules
 
+# Bibliotheques embarquees (voir Modules/CDTracker/Libs/README.md).
+# LibStub d'abord : LibOpenRaid s'y declare.
+Modules/CDTracker/Libs/LibStub/LibStub.lua
+Modules/CDTracker/Libs/LibOpenRaid/LibOpenRaid.lua
+Modules/CDTracker/Libs/LibOpenRaid/Functions.lua
+Modules/CDTracker/Libs/LibOpenRaid/GetPlayerInformation.lua
+Modules/CDTracker/Libs/LibOpenRaid/Deprecated.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_WarWithin.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_Dragonflight.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_Shadowlands.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_Wrath.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_Era.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_BurningCrusade.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_Cata.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_Pandaria.lua
+Modules/CDTracker/Libs/LibOpenRaid/ThingsToMantain_Midnight.lua
 Core/Compat.lua
 Core/Scheduler.lua
 Core/EventBus.lua
@@ -27,6 +44,7 @@ Modules/SwingTimer/SwingTimer.lua
 Modules/BossTimer/BossTimer.lua
 Modules/InterruptAlert/InterruptAlert.lua
 Modules/MoveAlert/MoveAlert.lua
+Modules/CDTracker/CDTracker.lua
 
 # Data du flavor retail uniquement : aucune data morte chargee sur ce client.
 # (aucune data pour ce flavor)

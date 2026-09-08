@@ -240,6 +240,7 @@ local HELP = {
     "  |cffffff00/mbs test stop|r — arrete le mode test",
     "  |cffffff00/mbs test boss <npcId>|r — rejoue la timeline d'un boss hors combat",
     "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume|sync on/off]",
+    "  |cffffff00/mbs cd|r [status|list|sync|barres|annonce|soi|kick|estimes on/off]",
     "  |cffffff00/mbs anchor|r [<spellId>|remove <spellId>] — ancre dediee pour les barres d'un sort",
     "  |cffffff00/mbs list|r — etat des modules",
     "  |cffffff00/mbs enable|disable|toggle <module>|r",
@@ -732,6 +733,98 @@ local function HandleBoss(arg1, arg2)
     PrintStatus(module)
 end
 
+--------------------------------------------------------------------------------
+-- Module CD Tracker (/mbs cd)
+--------------------------------------------------------------------------------
+
+local CD_FLAGS = {
+    barres = "bars", bars = "bars",
+    annonce = "broadcast", broadcast = "broadcast", diffusion = "broadcast",
+    soi = "showSelf", self = "showSelf",
+    kick = "interrupts", interrupts = "interrupts",
+    estimes = "estimates", estimates = "estimates", estimations = "estimates",
+}
+
+local SOURCE_LABELS = {
+    self = "soi", mbs = "MyBossSuite", lor = "LibOpenRaid", static = "estime",
+}
+
+local function PrintCDStatus(module)
+    local status = module:Status()
+    ns.Print(("CD Tracker : %d joueur(s) suivi(s), %d sort(s) annonce(s) par toi.")
+        :format(status.units, status.mySpells))
+    print(("  LibOpenRaid : |cffffff00%s|r"):format(status.libWhy))
+    local parts = {}
+    for source, count in pairs(status.counts) do
+        if count > 0 then
+            parts[#parts + 1] = ("%s %d"):format(SOURCE_LABELS[source] or source, count)
+        end
+    end
+    print("  sources : " .. (#parts > 0 and table.concat(parts, ", ") or "aucune donnee"))
+
+    local config = module:GetConfig()
+    if config then
+        print(("  barres %s | annonce %s | soi %s | estimes %s"):format(
+            config.bars ~= false and "on" or "off",
+            config.broadcast ~= false and "on" or "off",
+            config.showSelf ~= false and "on" or "off",
+            config.estimates ~= false and "on" or "off"))
+    end
+end
+
+local function HandleCD(arg1, arg2)
+    local module = ns:GetModule("cdTracker")
+    if not module then return end
+
+    local option = arg1 and arg1:lower()
+    if not option or option == "" or option == "status" then
+        return PrintCDStatus(module)
+    end
+
+    if option == "list" or option == "liste" then
+        local entries = module:List()
+        ns.Print(("cooldowns connus : %d"):format(#entries))
+        for i = 1, #entries do
+            local entry = entries[i]
+            local name = ns.GetSpellName(entry.spellId) or ("sort " .. entry.spellId)
+            print(("  %-16s %-22s %5.1fs  |cffaaaaaa%s|r"):format(
+                entry.unit, name, entry.remaining,
+                SOURCE_LABELS[entry.source] or entry.source))
+        end
+        if #entries == 0 then
+            print("    |cffaaaaaa(personne n'a encore annonce de cooldown)|r")
+        end
+        return
+    end
+
+    if option == "sync" or option == "demande" then
+        ns.Comm:Send("CDREQ")
+        module:BroadcastAll()
+        return ns.Print("etat demande au groupe, et le tien annonce.")
+    end
+
+    local field = CD_FLAGS[option]
+    if not field then
+        return ns.Print("usage : /mbs cd [status|list|sync|barres on/off|annonce on/off|"
+            .. "soi on/off|kick on/off|estimes on/off]")
+    end
+
+    local config = module:GetConfig()
+    if not config then return end
+    local value = (arg2 or ""):match("^%S+")
+    local bool = ParseBool(value)
+    if bool == nil then
+        return ns.Print(("usage : /mbs cd %s on|off"):format(option))
+    end
+
+    config[field] = bool
+    if field == "interrupts" then module:ForgetMySpells() end
+    if field == "bars" or field == "showSelf" or field == "estimates" then
+        module:RefreshBars()
+    end
+    PrintCDStatus(module)
+end
+
 SLASH_MYBOSSSUITE1 = "/mbs"
 SLASH_MYBOSSSUITE2 = "/mybosssuite"
 
@@ -773,6 +866,8 @@ SlashCmdList["MYBOSSSUITE"] = function(input)
         HandleMove(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "boss" then
         HandleBoss(arg1 ~= "" and arg1 or nil, arg2)
+    elseif cmd == "cd" then
+        HandleCD(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "profile" then
         HandleProfile(arg1 ~= "" and arg1 or nil, arg2 ~= "" and arg2 or nil)
     elseif cmd == "debug" then

@@ -487,14 +487,15 @@ mod : la rencontre a une nature, un début, une fin qualifiée et des phases.
 - [x] engage par synchronisation : timers repetitifs recalés sur le bon cycle,
       phase et heure d'entrée de phase du pair.
 - [x] `/mbs boss sync on|off`, compteurs envoyés / reçus dans `/mbs boss`.
-- [ ] le canal est réutilisable tel quel par le CD Tracker (Phase 5).
+- [x] le canal est réutilisable tel quel par le CD Tracker (Phase 5) — fait, il l'utilise sans y toucher (types `CD` et `CDREQ`).
 
 ### Non fait, et pourquoi
 
 - [ ] **Voix pour le compte à rebours** : fichiers son à produire ou à
       licencier. Le compte à rebours est texte.
 - [ ] **Data** : Onyxia, Kazzak et Herod sont des références de format ;
-      la couverture réelle vient de `tools/wcl-ingest` (`--kind`, `--zone`).
+      la couverture réelle vient de `tools/wcl-ingest` (`--kind`, `--zone`) et
+      demande `WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`.
 
 ---
 
@@ -507,9 +508,16 @@ Réordonné par rapport à la version initiale, pour deux raisons : le shim BigW
 - [ ] Client API : warcraftlogs.com/api/clients/ (OAuth, gratuit)
 - [ ] API v2 = GraphQL. Scriptable, donc pas limité à de la vérification ponctuelle.
 - [ ] `tools/wcl-ingest/` : pull de N logs par boss → deltas depuis le pull → **médiane** par spellId → génération du fichier `Data/<Flavor>/<Raid>/<Boss>.lua`.
-- [x] **Fusion à la régénération** (fait) : seuls `repeatInterval`, `variable` et le `time` des timers `PULL` sont réécrits. Le tableau `phases`, les timers `PHASE`/`CAST`/`AURA`, les libellés, `announce`, `flash` — tout ce qui s'écrit à la main — survit. Sans ça, éditer un fichier est jetable et un boss à phases n'est jamais régénérable : l'ingestion en masse s'arrête au premier boss non trivial. `--replace` écrase, un fichier illisible arrête le passage avant tout appel API.
-- [ ] **Proposition de phase** : le couple (écart-type du premier cast élevé, écart-type des intervalles serré) est la signature d'une capacité gated par une phase, pas d'une mécanique aléatoire. Aujourd'hui elle ressort en `variable = true` — cf. le commentaire de `VARIABLE_STDEV`, qui nomme déjà le cas. À convertir en `-- TODO phase ?` + `provisional`, le générateur signalant sans deviner.
-- [ ] **Origine des timers `PHASE`** : l'ingestion ne mesure qu'un delta depuis le pull, donc le `time` d'un timer `PHASE` reste écrit à la main et le timer reste `provisional`. Pour le mesurer il faut situer les bornes de phase dans le log : `phaseTransitions` (couverture à vérifier hors retail) ou la courbe de vie du boss — ni l'un ni l'autre n'est demandé par `FIGHT_QUERY`. C'est aussi ce qui permettrait de générer les entrées de `phases`, que `render_lua` n'émet pas (il ne sort que du `trigger = "PULL"`).
+- [x] **Fusion à la régénération** (fait) : seuls `repeatInterval`, `variable` et le `time` mesuré (timers `PULL`, et timers `PHASE` dont la borne a été située) sont réécrits. Le tableau `phases`, les timers `PHASE`/`CAST`/`AURA`, les libellés, `announce`, `flash` — tout ce qui s'écrit à la main — survit. Sans ça, éditer un fichier est jetable et un boss à phases n'est jamais régénérable : l'ingestion en masse s'arrête au premier boss non trivial. `--replace` écrase, un fichier illisible arrête le passage avant tout appel API.
+- [x] **Proposition de phase** (fait) : le couple (écart-type du premier cast élevé, écart-type des intervalles serré) est la signature d'une capacité gated par une phase, pas d'une mécanique aléatoire. Elle ne ressort plus en `variable = true` — qui dirait le contraire de ce qu'on a mesuré — mais en `-- TODO phase ?` + `provisional`, avec les deux écarts-types en commentaire et, quand une phase concentre les observations, laquelle. Le générateur signale sans deviner : convertir en `PHASE` demande de savoir *quelle* phase, ce qu'un delta depuis le pull ne dit pas.
+- [x] **Origine des timers `PHASE`** (fait) : `tools/wcl-ingest/wcl_phases.py` situe les bornes de phase dans le log, et les casts sont alors comptés depuis l'entrée dans leur phase. Un timer `PHASE` dont la borne a pu être située reçoit un `time` mesuré et perd son `provisional` ; sinon rien ne bouge et il reste écrit à la main.
+
+  Deux sources, dans cet ordre. **La data du boss elle-même** d'abord : le tableau `phases` dit déjà comment la phase se déclenche, il suffit de rejouer ce déclencheur sur le log — `HEALTH` sur la courbe de vie (reconstruite depuis les dégâts subis par le boss, filtrés côté serveur par `filterExpression`), `CAST` sur les casts déjà rapatriés, `PULL`/`PHASE` sur leur délai. C'est la source qui fait foi, parce que c'est exactement ce que le module fera en jeu. **`phaseTransitions`** ensuite, en secours, et seulement si son découpage compte autant de phases que la data : un mauvais alignement mesurerait précisément la mauvaise phase. La requête est séparée de `FIGHT_QUERY` exprès — sa couverture hors retail n'est pas garantie, et une absence se dégrade en « phase non située » au lieu de faire tomber l'ingestion.
+
+  Effet de bord qui vaut la peine : un sort présent dans deux phases voyait sa cadence polluée par le trou entre les deux (dernier cast de la P1 → premier de la P3), ce qui le faisait passer pour non déterministe. Un timer restreint à une phase prend maintenant la cadence de *sa* phase.
+
+  Ce qui reste non situable : un déclencheur `EMOTE` (texte localisé, non rejouable hors du jeu) et un franchissement de seuil tombé dans un trou de la courbe — le boss immunisé ne prend rien, donc sa vie n'est plus échantillonnée. Dans les deux cas la borne est déclarée inconnue, et un cast coincé entre deux bornes dont une manque n'est attribué à aucune phase.
+- [x] **Génération des entrées de `phases`** (fait) : un fichier qui n'a aucun tableau `phases` en reçoit une proposition depuis `phaseTransitions`, chaque entrée marquée `provisional = true`. Le déclencheur proposé sort de la dissymétrie entre les logs — vie constante et heures différentes ⇒ `HEALTH` + seuil médian ; heure constante et vies différentes ⇒ `PULL` + délai médian — et les chiffres qui l'ont fait retenir sont affichés. Un tableau `phases` déjà présent n'est **jamais** remplacé : c'est la mécanique du combat, pas une mesure.
 
 ```graphql
 query($code: String!, $fight: Int!) {
@@ -551,9 +559,18 @@ L'approche shim + `dofile` **ne fonctionne pas sur BigWigs** : les modules moder
 
 DBM est nettement plus shimmable : les timers y sont déclarés au chargement avec la durée en argument du constructeur (`self:NewCastTimer(12, 17086)`), donc capturables statiquement.
 
-Mais : **un fichier généré depuis du code GPL reste une œuvre dérivée**, quelle que soit la transformation. Si tu passes par là, l'addon entier bascule sous GPL et il faut un `NOTICE` + publication des sources. Extrait depuis WCL, non. C'est la raison principale de mettre 3a en tête.
+**Correction, relevé le 2026-09-08 dans les dépôts amont** : cette phase partait du principe que DBM et BigWigs étaient sous GPL, donc qu'accepter la GPL suffirait à en dériver de la data. C'est faux, et dans le mauvais sens.
 
-Ordre par boss : **3a** → 3b si une aura `EVENT` existe déjà et couvre le cas → 3c uniquement en dernier recours, en acceptant la contrainte de licence.
+| Projet | Licence réelle | Source |
+|---|---|---|
+| DBM | **All Rights Reserved**, `Copyright (c) 2021 Deadly Boss Mods` | `LICENSE` du dépôt |
+| BigWigs | **All Rights Reserved** : « You are free to fork and modify on GitHub, please ask us about anything else » | `## X-License` de `BigWigs.toc` |
+
+Aucun des deux n'accorde de droit de dériver hors de son propre dépôt. Passer MyBossSuite sous GPL **n'ouvre donc rien ici** : la contrainte n'est pas « ta licence est incompatible », elle est « tu n'as pas le droit ». La phase 3c est fermée, et elle l'aurait été quelle que soit la licence choisie.
+
+La seule porte qui reste est explicitement nommée par BigWigs : *demander*. Une autorisation écrite des auteurs, pour un usage précis. Tant qu'elle n'existe pas, WCL est la source unique — ce qui ne change rien au plan réel, puisque 3a est de toute façon la seule source qui donne de la data **par version de jeu**.
+
+Ordre par boss : **3a** → 3b si une aura `EVENT` existe déjà et couvre le cas → 3c uniquement avec une autorisation écrite.
 
 ---
 
@@ -602,8 +619,8 @@ Delta recalculé à chaque swing, jamais stocké en dur : la vitesse d'attaque c
 
 Principe : chaque client connaît **son propre** cooldown exact (`GetSpellCooldown` tient compte des talents, du haste et des procs pour soi-même). Chaque client broadcast sa vraie valeur au groupe via addon message, au lieu de deviner celle des autres.
 
-- [ ] `Modules/CDTracker/Libs/LibOpenRaid/` — embed (licence permissive)
-- [ ] `Modules/CDTracker/CDTracker.lua`
+- [x] `Modules/CDTracker/Libs/LibOpenRaid/` — embarquée (fait). **Licence : LGPL 2.1, pas « permissive »** comme annoncé ici. Sans conséquence pratique — un addon WoW est distribué en source, et on ne modifie pas une ligne de la lib — et sa section 3 autorise de prendre une copie sous GPL v2 « ou une version plus récente », donc aucun conflit avec la GPL v3 de l'addon. `LibStub` est embarquée avec (domaine public) : LibOpenRaid s'y déclare et ne l'embarque pas.
+- [x] `Modules/CDTracker/CDTracker.lua` (fait)
 
 ```lua
 local LibOpenRaid = LibStub("LibOpenRaid-1.0", true)
@@ -614,9 +631,26 @@ if LibOpenRaid then
 end
 ```
 
-**À vérifier avant de bâtir dessus** : LibOpenRaid est conçue pour retail. Son support classic est partiel selon les branches. Si elle ne tourne pas sur tes flavors cibles, tu es en fallback statique 100% du temps en classic — ce qui change complètement la valeur du module, et potentiellement la décision de le faire. Teste en premier, en groupe réel, avant d'écrire l'UI.
+**Vérifié — et la réponse est non.** LibOpenRaid n'est pas « partielle » en classic, elle ne se charge pas du tout :
 
-- [ ] Fallback : joueur non compatible → table statique `Data/Specs.lua`, par flavor (les CD de base diffèrent énormément entre vanilla et retail).
+```lua
+LIB_OPEN_RAID_CAN_LOAD = false
+--don't load if it's not retail, emergencial patch due to classic and bcc stuff not transposed yet
+if (WOW_PROJECT_ID ~= WOW_PROJECT_MAINLINE and not isExpansion_Dragonflight()) then
+    return
+end
+```
+
+Sur Classic Era, TBC, Wrath, Cata et MoP Classic, aucune bibliothèque n'est déclarée et `LibStub:GetLibrary("LibOpenRaid-1.0", true)` rend `nil`. Les fichiers `ThingsToMantain_Era/BurningCrusade/Wrath/Cata/Pandaria` existent — l'auteur prévoit le support — mais ne sont jamais atteints. Ça n'a pas demandé de test en groupe réel : c'est en tête du fichier.
+
+**Ce que ça change** : sur cinq des six flavors visés, il n'y a rien à recevoir. Le fallback statique n'est pas le cas dégradé du module, il *est* le module en classic. Le broadcast entre joueurs de MyBossSuite reste possible via `Core/Comm.lua` (déjà écrit pour le Boss Timer) — c'est la seule façon d'avoir un CD exact en classic, et elle ne couvre que les joueurs qui font aussi tourner MyBossSuite.
+
+Le `.toc` n'inscrit donc la lib que sur retail : l'inscrire ailleurs ne ferait que compiler 600 Ko de Lua pour rien.
+
+- [x] **Diffusion entre porteurs de MyBossSuite** (fait) — la source principale, et celle qui rend le module possible en classic. Chaque client lit son propre cooldown (exact : talents, haste et procs compris) et l'annonce sur `Core/Comm.lua`. Aucune table de sorts par classe et par version à maintenir : chacun annonce la sienne. C'est ce qui évite le piège habituel du CD tracker classic, qui devine les cooldowns des autres et se trompe.
+- [x] **Écouter `SPELL_CAST_SUCCESS`, pas `SPELL_INTERRUPT`** (fait) — un kick lancé dans le vide part quand même en cooldown sans générer d'`SPELL_INTERRUPT`. Le point est écrit en phase 6 ; il vaut déjà ici, puisque c'est ce module qui mesure.
+- [x] **Quatre sources classées** (fait) : `self` > `mbs` > `lor` > `static`. Une source moins sûre n'écrase jamais une source plus sûre encore valide.
+- [ ] Fallback : joueur non compatible → table statique `Data/<flavor>/Specs.lua`. Le format est écrit et le module le consomme déjà (source `static`, barre grisée) ; **aucun fichier n'est livré**, donc rien n'est affiché comme estimé aujourd'hui. Les CD de base diffèrent énormément entre vanilla et retail, et une estimation ne vaut d'être écrite que si elle est juste.
 
 **Affichage différencié, non négociable** : un CD estimé s'affiche grisé/hachuré, jamais comme un CD exact. Un cooldown faux présenté comme vrai est pire qu'un joueur absent de la liste ; marqué "estimé", il reste utile au raid lead qui sait quoi en faire.
 
@@ -785,5 +819,5 @@ README.md
 - **Vanilla 1.x : jusqu'où ?** `C_Timer.NewTimer` et `C_NamePlate` manquent sur les builds les plus anciens. Soit tu écris un scheduler `OnUpdate` maison dans Compat, soit tu poses un plancher (ex. Classic Era actuel plutôt que 1.12 littéral) et tu le documentes. Décider maintenant : ça conditionne la moitié de Compat.
 - **Data par flavor : dossiers séparés ou table d'overrides ?** Dossiers = plus lisible et pas de data morte chargée, overrides = moins de duplication quand les timings sont identiques. Le choix impacte le générateur WCL, donc à trancher avant d'écrire `tools/wcl-ingest`.
 - **WeakAuras : ratio `EVENT` vs `BOSS_MOD` ?** Le `grep` de la Phase 3b répond en 30 secondes et détermine si 3b vaut le code qu'il demande.
-- **BigWigs/DBM : acceptes-tu de passer l'addon sous GPL ?** Si non, 3c est hors table et WCL devient la source unique — ce qui simplifie beaucoup mais rend l'ingestion critique.
-- **CD Tracker : LibOpenRaid tourne-t-elle sur tes flavors classic ?** À tester avant toute écriture de module.
+- ~~**BigWigs/DBM : acceptes-tu de passer l'addon sous GPL ?**~~ **Tranché, et la question était mal posée.** L'addon est sous **GPL v3** (`LICENSE` à la racine, `## X-License` dans les six `.toc`). Mais ça n'ouvre pas 3c : DBM et BigWigs sont *All Rights Reserved*, pas GPL — voir 3c. WCL est la source unique, ce qui rend l'ingestion critique.
+- ~~**CD Tracker : LibOpenRaid tourne-t-elle sur tes flavors classic ?**~~ **Non — répondu par le code, sans test en jeu.** `LibOpenRaid.lua` sort en tête de fichier sur tout client non retail (`--don't load if it's not retail, emergencial patch due to classic and bcc stuff not transposed yet`). Sur les cinq flavors classic, `LIB_OPEN_RAID_CAN_LOAD` reste `false` et rien ne se déclare dans LibStub. Voir `Modules/CDTracker/Libs/README.md`.

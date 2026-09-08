@@ -61,6 +61,7 @@ local FILES = {
     "Modules/BossTimer/BossTimer.lua",
     "Modules/InterruptAlert/InterruptAlert.lua",
     "Modules/MoveAlert/MoveAlert.lua",
+    "Modules/CDTracker/CDTracker.lua",
     -- Les fichiers de data se chargent en dernier, comme dans un .toc.
     "Modules/BossTimer/Data/vanilla/Onyxias_Lair/Onyxia.lua",
     "Modules/BossTimer/Data/vanilla/Blasted_Lands/Lord_Kazzak.lua",
@@ -1232,6 +1233,193 @@ SlashCmdList["MYBOSSSUITE"]("kick data")
 ok(Mock.FindPrinted("Fireball Volley"), "/mbs kick data liste la data livree")
 SlashCmdList["MYBOSSSUITE"]("move data")
 ok(Mock.FindPrinted("Fire Wall"), "/mbs move data liste la data livree")
+
+--------------------------------------------------------------------------------
+
+suite("CD Tracker")
+
+-- Le module repose sur un principe simple : chaque client connait SON cooldown
+-- exactement, et l'annonce. Ce qui merite d'etre teste, c'est ce qui distingue
+-- une information sue d'une information supposee — parce que designer un joueur
+-- dont on croit a tort que le kick est pret est le bug qui tue le module, et la
+-- rotation d'interrupt qui s'appuie dessus.
+
+local cd = ns:GetModule("cdTracker")
+local ME = "Testeur"
+local KICK = 1766
+
+Mock.groupSize = 3
+Mock.inRaid = false
+Mock.units.party1 = { guid = "Player-0-0002", name = "Tank" }
+Mock.units.party2 = { guid = "Player-0-0003", name = "Heal" }
+ns:SetModuleEnabled("cdTracker", true)
+Mock.Advance(4)   -- l'annonce d'arrivee part avec un decalage aleatoire
+                  -- (jusqu'a 3 s) : on la laisse passer avant de mesurer.
+
+-- Le voleur mock ne connait que Kick : c'est le seul sort suivi, et il vient de
+-- la liste d'interrupts deja curee, pas d'une table a maintenir.
+local mine = cd:MySpells()
+equal(#mine, 1, "un seul sort suivi (le mock ne connait que Kick)")
+equal(mine[1].spellId, KICK, "et c'est Kick")
+equal(mine[1].kind, "interrupt", "classe comme interrupt")
+
+--- Cooldown propre : lu directement, exact, sans reseau.
+Mock.cooldowns[KICK] = { start = Mock.now, duration = 15 }
+local remaining, duration = cd:ReadOwn(KICK, "interrupt")
+equal(remaining, 15, "son propre cooldown est lu exactement")
+equal(duration, 15, "avec sa duree")
+equal(cd:Remaining(ME, KICK), 15, "et retenu")
+ok(cd:GetGroup():GetBar(ME .. "|" .. KICK) ~= nil, "une barre est affichee")
+
+--- Le GCD n'est pas un cooldown : l'annoncer ferait clignoter la liste a chaque
+-- sort lance.
+Mock.cooldowns[KICK] = { start = Mock.now, duration = 1.5 }
+equal(cd:ReadOwn(KICK, "interrupt"), 0, "le GCD n'est pas compte comme cooldown")
+equal(cd:Remaining(ME, KICK), nil, "et n'entre pas dans le magasin")
+Mock.cooldowns[KICK] = nil
+
+--- Diffusion : on ecoute SPELL_CAST_SUCCESS, pas SPELL_INTERRUPT. Un kick lance
+-- dans le vide part quand meme en cooldown mais ne genere aucun SPELL_INTERRUPT.
+Mock.addonMessages = {}
+Mock.cooldowns[KICK] = { start = Mock.now, duration = 15 }
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", PLAYER_GUID, BOSS_GUID, KICK)
+Mock.Advance(0.5)
+local sent = Mock.LastAddonMessage()
+ok(sent ~= nil and sent.message:find("\tCD\t" .. KICK .. "\t", 1, true) ~= nil,
+    "un cast de Kick est annonce au groupe")
+ok(sent ~= nil and sent.message:find("\t15\t15\t", 1, true) ~= nil,
+    "avec le restant et la duree mesures")
+
+--- Un sort qu'on ne suit pas ne declenche rien.
+Mock.addonMessages = {}
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", PLAYER_GUID, BOSS_GUID, 17086)
+Mock.Advance(0.5)
+equal(#Mock.addonMessages, 0, "un sort non suivi n'est pas annonce")
+
+--- Reception : le cooldown d'un pair est exact, il vient de lui.
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. KICK .. "\t12\t15\tinterrupt",
+    "PARTY", "Tank")
+equal(cd:Remaining("Tank", KICK), 12, "le cooldown annonce par un pair est retenu")
+ok(cd:Knows("Tank", KICK), "et on sait desormais qu'il possede ce sort")
+ok(cd:GetGroup():GetBar("Tank|" .. KICK) ~= nil, "avec sa barre")
+
+-- Le meme joueur n'a pas forcement le meme nom des deux cotes : l'expediteur
+-- d'un message addon arrive parfois avec son royaume la ou le roster n'en rend
+-- aucun. Deux orthographes, ce serait deux entrees, une barre en double, et un
+-- joueur qu'on croit sans kick alors qu'il vient de l'annoncer.
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. KICK .. "\t7\t15\tinterrupt",
+    "PARTY", "Tank-Royaume")
+equal(cd:Remaining("Tank", KICK), 7,
+    "un expediteur avec royaume est recolle sur le joueur du roster")
+equal(cd:Remaining("Tank-Royaume", KICK), nil, "et ne cree pas de doublon")
+
+--- Hierarchie des sources : une estimation ne parle pas par-dessus une mesure.
+equal(cd:Record("Tank", KICK, 30, 30, "static"), false,
+    "une estimation n'ecrase pas un cooldown annonce par son proprietaire")
+equal(cd:Remaining("Tank", KICK), 7, "la valeur exacte tient")
+equal(cd:Record("Tank", KICK, 8, 15, "mbs"), true,
+    "mais le proprietaire peut se corriger lui-meme")
+equal(cd:Remaining("Tank", KICK), 8, "et c'est sa nouvelle valeur qui compte")
+
+--- Une fois la valeur sure expiree, l'estimation reprend la main.
+Mock.Advance(9)
+equal(cd:Remaining("Tank", KICK), nil, "un cooldown expire quitte le magasin")
+equal(cd:Record("Tank", KICK, 30, 30, "static"), true,
+    "plus rien de sur en face : l'estimation est acceptee")
+local estimated = cd:GetGroup():GetBar("Tank|" .. KICK)
+ok(estimated ~= nil and estimated.variable == true,
+    "et s'affiche comme estimee (grisee, prefixee ~)")
+
+--- « Pret » et « je ne sais pas » ne sont pas la meme chose. C'est toute la
+-- difference entre une rotation qui marche et une rotation qui envoie un joueur
+-- sans kick.
+cd:Record("Tank", KICK, 0, 0, "mbs")
+local ready = cd:ReadyUnits(KICK)
+local readySet = {}
+for i = 1, #ready do readySet[ready[i]] = true end
+ok(readySet["Tank"] == true, "un pair dont le kick est revenu est pret")
+ok(readySet["Heal-Mock"] == nil, "un joueur dont on ne sait rien n'est PAS compte pret")
+
+Mock.cooldowns[KICK] = { start = Mock.now, duration = 15 }
+cd:ReadOwn(KICK, "interrupt")
+ready = cd:ReadyUnits(KICK)
+readySet = {}
+for i = 1, #ready do readySet[ready[i]] = true end
+ok(readySet[ME] == nil, "soi-meme en cooldown n'est pas compte pret")
+Mock.cooldowns[KICK] = nil
+cd:ReadOwn(KICK, "interrupt")
+ok(cd:Remaining(ME, KICK) == nil, "cooldown fini : plus rien a afficher")
+
+--- Une demande d'etat est honoree, mais pas deux fois de suite : sans throttle,
+-- tout le raid repond dans la meme image a chaque arrivee.
+Mock.addonMessages = {}
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCDREQ", "PARTY", "Nouveau-Mock")
+Mock.Advance(3)
+ok(#Mock.addonMessages > 0, "une demande d'etat obtient une reponse")
+local answered = #Mock.addonMessages
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCDREQ", "PARTY", "Autre-Mock")
+Mock.Advance(3)
+equal(#Mock.addonMessages, answered, "une deuxieme demande immediate est ignoree")
+
+--- Un joueur qui quitte le groupe est oublie : une barre qui continue a tourner
+-- pour quelqu'un qui n'est plus la est un mensonge tranquille.
+cd:Record("Tank", KICK, 20, 20, "mbs")
+ok(cd:Remaining("Tank", KICK) ~= nil, "cooldown suivi avant le depart")
+Mock.units.party1 = nil
+Mock.units.party2 = nil
+Mock.groupSize = 0
+cd:PruneRoster()
+equal(cd:Remaining("Tank", KICK), nil, "le partant est oublie")
+equal(cd:GetGroup():GetBar("Tank|" .. KICK), nil, "et sa barre disparait")
+ok(cd:Knows("Tank", KICK) == false, "on n'affirme plus rien sur lui")
+
+--- LibOpenRaid : absente en classic, et le module doit le DIRE plutot que de
+-- laisser croire a une couverture qu'il n'a pas.
+local status = cd:Status()
+equal(status.lib, false, "LibOpenRaid n'est pas active dans le mock")
+ok(status.libWhy:find(retail and "non chargee" or "hors retail", 1, true) ~= nil,
+    "et le statut dit pourquoi (" .. status.libWhy .. ")")
+
+--- Lecture defensive de la lib : `docs.txt` se contredit sur l'ordre des
+-- retours. Une valeur incoherente doit etre ignoree, pas affichee.
+local fakeLib = {
+    GetCooldownStatusFromCooldownInfo = function(info)
+        return false, 0.5, info.timeLeft, 1, 0, 0, 0, info.duration
+    end,
+}
+equal(cd:ReadLibCooldown(fakeLib, { timeLeft = 10, duration = 30 }), 10,
+    "une lecture coherente est retenue")
+equal(cd:ReadLibCooldown(fakeLib, { timeLeft = 99, duration = 30 }), nil,
+    "un restant superieur a la duree est refuse")
+equal(cd:ReadLibCooldown(fakeLib, { timeLeft = 10, duration = 0 }), nil,
+    "une duree nulle est refusee")
+local brokenLib = { GetCooldownStatusFromCooldownInfo = function() error("boom") end }
+equal(cd:ReadLibCooldown(brokenLib, {}), nil, "une lib qui leve ne casse rien")
+
+--- Commandes.
+Mock.printed = {}
+SlashCmdList["MYBOSSSUITE"]("cd")
+ok(Mock.FindPrinted("CD Tracker"), "/mbs cd affiche l'etat")
+ok(Mock.FindPrinted("LibOpenRaid"), "et dit ce qu'il en est de LibOpenRaid")
+cd:Record("Tank", KICK, 11, 15, "mbs")
+Mock.printed = {}
+SlashCmdList["MYBOSSSUITE"]("cd list")
+ok(Mock.FindPrinted("Kick"), "/mbs cd list liste les cooldowns connus")
+SlashCmdList["MYBOSSSUITE"]("cd barres off")
+equal(ns.db.modules.cdTracker.bars, false, "/mbs cd barres off")
+equal(cd:GetGroup():Count(), 0, "les barres sont retirees")
+SlashCmdList["MYBOSSSUITE"]("cd barres on")
+equal(ns.db.modules.cdTracker.bars, true, "/mbs cd barres on")
+ok(cd:GetGroup():Count() > 0, "et reviennent sans perdre l'etat suivi")
+
+--- Desactivation complete : aucune barre, aucun handler, aucune trace.
+ns:SetModuleEnabled("cdTracker", false)
+equal(cd:GetGroup():Count(), 0, "module desactive : plus une barre")
+equal(cd:Remaining("Tank", KICK), nil, "ni la moindre donnee retenue")
+Mock.addonMessages = {}
+Mock.FireEvent("CHAT_MSG_ADDON", "MBS", "1\tCD\t" .. KICK .. "\t12\t15", "PARTY", "Tank")
+equal(cd:Remaining("Tank", KICK), nil, "et plus personne n'ecoute")
+Mock.cooldowns[KICK] = nil
 
 --------------------------------------------------------------------------------
 
