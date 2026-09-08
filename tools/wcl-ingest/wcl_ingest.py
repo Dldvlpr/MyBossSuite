@@ -28,6 +28,10 @@ gratuit), puis un fichier `.env` a la racine du depot (voir `.env.example`) :
 Les variables d'environnement font aussi l'affaire et restent prioritaires
 (bash : `export WCL_CLIENT_ID=...` ; PowerShell : `$env:WCL_CLIENT_ID = '...'`).
 
+Les rapports de plus de 2 ans sont ARCHIVES et invisibles pour la cle
+applicative : `--user-auth` bascule sur l'endpoint /user (compte abonne requis,
+autorisation dans le navigateur une seule fois).
+
 Exemples :
 
     # decouverte automatique des logs via le classement de la rencontre
@@ -57,13 +61,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wa-extract"))
 import lua_table  # noqa: E402
 import wcl_phases  # noqa: E402
 from wcl_api import (  # noqa: E402
+    DEFAULT_REDIRECT_PORT,
     FLAVORS,
     WCLError,
+    authenticate,
     discover_reports,
     fetch_events,
     fetch_fight,
     fetch_phase_transitions,
-    get_token,
     load_credentials,
     parse_report_arg,
 )
@@ -705,6 +710,15 @@ def parse_args(argv=None):
                         help="n'essaie pas de situer les bornes de phase : les timers "
                              "PHASE gardent leur `time` ecrit a la main et aucune "
                              "proposition n'est faite. Economise les requetes de degats.")
+    parser.add_argument("--user-auth", action="store_true",
+                        help="s'authentifie comme UTILISATEUR (endpoint /user) au lieu "
+                             "de la cle applicative : seule facon de lire les rapports "
+                             "archives (plus de 2 ans), et demande un compte abonne. "
+                             "Ouvre le navigateur une fois, puis reutilise le jeton cache.")
+    parser.add_argument("--auth-port", type=int, default=DEFAULT_REDIRECT_PORT,
+                        help="port d'ecoute de la redirection OAuth (defaut %d). Doit "
+                             "correspondre a la redirect URL enregistree sur le client API."
+                             % DEFAULT_REDIRECT_PORT)
     parser.add_argument("--dry-run", action="store_true", help="affiche les stats sans ecrire de fichier")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -776,7 +790,7 @@ def main(argv=None) -> int:
 
     try:
         client_id, client_secret = load_credentials()
-        token = get_token(client_id, client_secret)
+        token = authenticate(client_id, client_secret, args.user_auth, args.auth_port)
     except WCLError as exc:
         print(exc, file=sys.stderr)
         return 2

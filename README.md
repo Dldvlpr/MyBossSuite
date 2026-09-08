@@ -390,6 +390,17 @@ tools/wa-extract/wa_extract.py count WeakAuras.lua
 Le `WeakAuras.lua` est dans
 `WTF/Account/<COMPTE>/SavedVariables/WeakAuras.lua`.
 
+> **Rapports archivés.** WarcraftLogs archive les logs de plus de 2 ans, et
+> l'endpoint applicatif ne les sert pas. `--user-auth` bascule sur l'endpoint
+> `/user` : le script ouvre le navigateur une fois pour une autorisation OAuth,
+> puis réutilise le jeton mis en cache dans `.wcl-token.json` (non versionné —
+> il contient un *refresh token*). Cela demande **un compte abonné** (palier Or
+> ou plus) et une redirect URL enregistrée valant exactement
+> `http://localhost:4480/callback` (modifiable via `--auth-port`).
+> Quand c'est possible, viser une partition récente avec `--partition` reste
+> préférable : pas d'abonnement, et des timings mesurés sur le contenu tel
+> qu'il tourne aujourd'hui.
+
 * **`wcl-ingest`** — source principale de timings. OAuth client credentials
   (`WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`, à mettre dans un `.env` à la racine du
   dépôt — copie `.env.example` ; le fichier est ignoré par git, et les variables
