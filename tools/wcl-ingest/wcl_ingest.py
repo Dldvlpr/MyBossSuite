@@ -195,7 +195,20 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
                 if game_id is not None:
                     seen[(game_id, source.get("name") or "?")] += 1
             print(f"  ! {code}:{fight_id} : aucun cast ennemi retenu", file=sys.stderr)
-            if seen:
+            # Le combat lui-meme situe le probleme : un nom et un encounterID
+            # disent tout de suite si le fightID designe le bon pull.
+            print("      combat : %s (encounterID %s), %d evenement(s) recus"
+                  % (fight.get("name") or "?", fight.get("encounterID"), len(events)),
+                  file=sys.stderr)
+            if not events:
+                # Distinction qui compte : zero evenement sur un combat de boss
+                # n'est pas un mauvais npcId, c'est un rapport qui ne rend pas
+                # son contenu — le cas typique d'une archive a moitie rendue.
+                print("      Le rapport n'a rendu AUCUN evenement. Ce n'est pas un "
+                      "probleme de --npc-id : soit le fightID ne designe aucun "
+                      "combat reel, soit le rapport (archive) ne sert pas encore "
+                      "son contenu a l'API.", file=sys.stderr)
+            elif seen:
                 detail = ", ".join(
                     "%s (npcId %s, %d casts)" % (name, game_id, count)
                     for (game_id, name), count in sorted(seen.items(), key=lambda kv: -kv[1])[:8])
