@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.1
+
+      - name: Syntaxe, suite headless, .toc
+        run: tests/run.sh
+
+      - name: Outils Python
+        run: |
+          python3 -m py_compile tools/wcl-ingest/wcl_ingest.py
+          python3 -m py_compile tools/wa-extract/wa_extract.py tools/wa-extract/lua_table.py
