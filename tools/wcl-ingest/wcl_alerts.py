@@ -40,7 +40,8 @@ et juste qu'une liste longue qui alerte a tort.
 
 ## Usage
 
-    export WCL_CLIENT_ID=... WCL_CLIENT_SECRET=...
+    # identifiants dans `.env` a la racine du depot (voir `.env.example`),
+    # ou dans l'environnement, qui reste prioritaire.
 
     # les deux listes, decouverte automatique des logs
     tools/wcl-ingest/wcl_alerts.py --encounter 1084 --npc-id 10184 \\
@@ -57,7 +58,6 @@ conservees et fusionnees, sauf avec `--replace`.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import statistics
 import sys
@@ -74,6 +74,7 @@ from wcl_api import (  # noqa: E402
     fetch_events,
     fetch_fight,
     get_token,
+    load_credentials,
     parse_report_arg,
 )
 
@@ -502,13 +503,8 @@ def main(argv=None) -> int:
         print("--out ne vaut que pour un seul mode : precise --mode.", file=sys.stderr)
         return 2
 
-    client_id = os.environ.get("WCL_CLIENT_ID")
-    client_secret = os.environ.get("WCL_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        print("WCL_CLIENT_ID / WCL_CLIENT_SECRET manquants dans l'environnement.", file=sys.stderr)
-        return 2
-
     try:
+        client_id, client_secret = load_credentials()
         token = get_token(client_id, client_secret)
     except WCLError as exc:
         print(exc, file=sys.stderr)

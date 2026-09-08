@@ -1,3 +1,6 @@
 *.zip
 __pycache__/
 .DS_Store
+
+# Identifiants WarcraftLogs : jamais dans le depot.
+.env
