@@ -74,6 +74,12 @@ local INTERRUPTS = {
 
 M.INTERRUPTS = INTERRUPTS
 
+-- Partagee avec le CD Tracker : quels sorts d'interruption existent par classe
+-- est un fait, pas une affaire de module. Le publier ici evite d'en tenir deux
+-- copies qui divergeront — et le CD Tracker n'a pas a dependre de l'existence
+-- du module d'alerte kick pour autant.
+ns.InterruptSpells = INTERRUPTS
+
 function M:ResolveInterrupt()
     local config = self:GetConfig()
 

@@ -487,7 +487,7 @@ mod : la rencontre a une nature, un début, une fin qualifiée et des phases.
 - [x] engage par synchronisation : timers repetitifs recalés sur le bon cycle,
       phase et heure d'entrée de phase du pair.
 - [x] `/mbs boss sync on|off`, compteurs envoyés / reçus dans `/mbs boss`.
-- [ ] le canal est réutilisable tel quel par le CD Tracker (Phase 5).
+- [x] le canal est réutilisable tel quel par le CD Tracker (Phase 5) — fait, il l'utilise sans y toucher (types `CD` et `CDREQ`).
 
 ### Non fait, et pourquoi
 
@@ -620,7 +620,7 @@ Delta recalculé à chaque swing, jamais stocké en dur : la vitesse d'attaque c
 Principe : chaque client connaît **son propre** cooldown exact (`GetSpellCooldown` tient compte des talents, du haste et des procs pour soi-même). Chaque client broadcast sa vraie valeur au groupe via addon message, au lieu de deviner celle des autres.
 
 - [x] `Modules/CDTracker/Libs/LibOpenRaid/` — embarquée (fait). **Licence : LGPL 2.1, pas « permissive »** comme annoncé ici. Sans conséquence pratique — un addon WoW est distribué en source, et on ne modifie pas une ligne de la lib — et sa section 3 autorise de prendre une copie sous GPL v2 « ou une version plus récente », donc aucun conflit avec la GPL v3 de l'addon. `LibStub` est embarquée avec (domaine public) : LibOpenRaid s'y déclare et ne l'embarque pas.
-- [ ] `Modules/CDTracker/CDTracker.lua`
+- [x] `Modules/CDTracker/CDTracker.lua` (fait)
 
 ```lua
 local LibOpenRaid = LibStub("LibOpenRaid-1.0", true)
@@ -647,7 +647,10 @@ Sur Classic Era, TBC, Wrath, Cata et MoP Classic, aucune bibliothèque n'est dé
 
 Le `.toc` n'inscrit donc la lib que sur retail : l'inscrire ailleurs ne ferait que compiler 600 Ko de Lua pour rien.
 
-- [ ] Fallback : joueur non compatible → table statique `Data/Specs.lua`, par flavor (les CD de base diffèrent énormément entre vanilla et retail).
+- [x] **Diffusion entre porteurs de MyBossSuite** (fait) — la source principale, et celle qui rend le module possible en classic. Chaque client lit son propre cooldown (exact : talents, haste et procs compris) et l'annonce sur `Core/Comm.lua`. Aucune table de sorts par classe et par version à maintenir : chacun annonce la sienne. C'est ce qui évite le piège habituel du CD tracker classic, qui devine les cooldowns des autres et se trompe.
+- [x] **Écouter `SPELL_CAST_SUCCESS`, pas `SPELL_INTERRUPT`** (fait) — un kick lancé dans le vide part quand même en cooldown sans générer d'`SPELL_INTERRUPT`. Le point est écrit en phase 6 ; il vaut déjà ici, puisque c'est ce module qui mesure.
+- [x] **Quatre sources classées** (fait) : `self` > `mbs` > `lor` > `static`. Une source moins sûre n'écrase jamais une source plus sûre encore valide.
+- [ ] Fallback : joueur non compatible → table statique `Data/<flavor>/Specs.lua`. Le format est écrit et le module le consomme déjà (source `static`, barre grisée) ; **aucun fichier n'est livré**, donc rien n'est affiché comme estimé aujourd'hui. Les CD de base diffèrent énormément entre vanilla et retail, et une estimation ne vaut d'être écrite que si elle est juste.
 
 **Affichage différencié, non négociable** : un CD estimé s'affiche grisé/hachuré, jamais comme un CD exact. Un cooldown faux présenté comme vrai est pire qu'un joueur absent de la liste ; marqué "estimé", il reste utile au raid lead qui sait quoi en faire.
 

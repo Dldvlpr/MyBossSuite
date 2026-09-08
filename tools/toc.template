@@ -29,6 +29,7 @@ Modules/SwingTimer/SwingTimer.lua
 Modules/BossTimer/BossTimer.lua
 Modules/InterruptAlert/InterruptAlert.lua
 Modules/MoveAlert/MoveAlert.lua
+Modules/CDTracker/CDTracker.lua
 
 # Data du flavor @FLAVOR@ uniquement : aucune data morte chargee sur ce client.
 @DATA_FILES@

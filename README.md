@@ -20,14 +20,22 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 3b | `tools/wa-extract` (WeakAuras perso) | outil écrit |
 | 3c | Extraction depuis DBM/BigWigs | **fermée** — les deux sont *All Rights Reserved*, pas GPL |
 | 4 | Module Swing Timer | fait |
-| 5 | Module CD Tracker | lib embarquée ; module non écrit — **LibOpenRaid ne tourne pas en classic** |
+| 5 | Module CD Tracker | fait, sur les 6 flavors — voir la note ci-dessous |
 | 6 | Module Interrupt Rotation | non fait — dépend de la phase 5 |
 | 7 | `Core/Alerts.lua`, alerte Kick, alerte Move (GTFO) | fait |
 | 7b | `tools/wcl-ingest/wcl_alerts.py` (data kick + move) | outil écrit, **data à générer** |
 
-Livrable atteint : **un addon installable, configurable, avec quatre modules
-fonctionnels** (Swing Timer, Boss Timer, alerte Kick, alerte Move), plutôt que
-six modules à moitié faits.
+Livrable atteint : **un addon installable, configurable, avec cinq modules
+fonctionnels** (Swing Timer, Boss Timer, CD Tracker, alerte Kick, alerte Move),
+plutôt que six modules à moitié faits.
+
+Le CD Tracker ne s'appuie pas sur LibOpenRaid pour fonctionner, parce qu'elle ne
+se charge pas hors retail. Il repose sur le fait que **chaque client connaît son
+propre cooldown exactement** (`GetSpellCooldown` tient compte des talents, du
+haste et des procs — pour soi) et l'annonce au groupe via `Core/Comm.lua`. C'est
+exact sur les six versions du jeu, entre porteurs de MyBossSuite. LibOpenRaid
+s'ajoute par-dessus sur retail, pour couvrir les joueurs qui font tourner
+Details! ou OmniCD sans MyBossSuite.
 
 Le Boss Timer est un vrai moteur de rencontre, du niveau de ce qu'on attend
 d'un DBM ou d'un BigWigs : raid, donjon et world boss, phases visibles avec
@@ -67,6 +75,15 @@ chaque client charge celui qui correspond à son suffixe.
 | `/mbs boss phase <n>` | force la phase (en combat ou en test) si la détection a manqué |
 | `/mbs boss annonces\|compte\|phases\|cadre\|resume\|son\|sync on\|off` | annonces des timers, compte à rebours, annonce de phase, cadre boss/phase, résumé de fin de combat, son, synchronisation de groupe |
 | `/mbs alert boss ...` | texte, couleur, taille, son de l'annonce boss (voir ci-dessous) |
+
+### CD Tracker
+
+| Commande | Effet |
+|---|---|
+| `/mbs cd` | joueurs suivis, sources actives, état de LibOpenRaid |
+| `/mbs cd list` | cooldowns connus, triés par temps restant, avec leur source |
+| `/mbs cd sync` | annonce les tiens et demande les leurs |
+| `/mbs cd barres\|annonce\|soi\|kick\|estimes on\|off` | barres à l'écran, diffusion de tes cooldowns, s'afficher soi-même, suivre les interrupts, afficher les estimations |
 
 ### Alertes (kick, move et annonce boss)
 
@@ -121,6 +138,14 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   remontée à l'error handler du client, au plus une fois par minute), et les
   listes de handlers sont remplacées plutôt que modifiées en place : un module
   qui se désinscrit pendant un dispatch ne fait jamais appeler `nil`.
+* **`Modules/CDTracker/CDTracker.lua`** — cooldowns du groupe. Le principe qui
+  le rend possible sur les six flavors : chaque client connaît **son** cooldown
+  exactement, et l'annonce. Quatre sources classées par confiance (`self`, `mbs`,
+  `lor`, `static`) ; une source moins sûre n'écrase jamais une source plus sûre
+  encore valide, et une estimation s'affiche grisée et préfixée `~`. Le module
+  écoute `SPELL_CAST_SUCCESS`, pas `SPELL_INTERRUPT` : un kick lancé dans le vide
+  part quand même en cooldown mais ne génère aucun `SPELL_INTERRUPT`, et écouter
+  le mauvais événement ferait croire le sort encore disponible.
 * **`Core/Comm.lua`** — messages addon entre joueurs du groupe. Préfixe `MBS`,
   canal choisi seul (`INSTANCE_CHAT`, `RAID`, `PARTY`), messages typés en
   champs séparés par des tabulations, version de protocole en tête : deux
@@ -264,12 +289,24 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   (`isOffHand`, 21e argument de `SWING_DAMAGE`, 13e de `SWING_MISSED`) sont
   reconnus et ignorés : ils ne relancent pas la barre, mais elle ne les affiche
   pas non plus.
-* **Précision du CD Tracker** (quand il existera) : Blizzard bloque la lecture
-  du cooldown exact d'un autre joueur sans son broadcast. Sans addon compatible
-  en face, ce sera de l'estimé — et un CD estimé devra s'afficher comme tel.
-  En **classic, c'est le cas nominal** : LibOpenRaid ne s'y charge pas du tout
-  (`--don't load if it's not retail` en tête de son fichier), donc rien n'arrive
-  d'un joueur qui ne fait pas tourner MyBossSuite.
+* **Le CD Tracker ne voit que ceux qui parlent.** Blizzard bloque la lecture du
+  cooldown exact d'un autre joueur sans son broadcast (API anti-triche). Un
+  joueur qui ne fait tourner ni MyBossSuite ni (en retail) un addon à
+  LibOpenRaid n'apparaît donc pas du tout — ce qui est la bonne réponse : il
+  vaut mieux ne rien afficher que d'inventer. En **classic, LibOpenRaid ne se
+  charge pas du tout** (`--don't load if it's not retail` en tête de son
+  fichier), donc la couverture s'y limite aux porteurs de MyBossSuite.
+* **Le CD Tracker ne suit que les interrupts pour l'instant.** La liste vient de
+  `ns.InterruptSpells`, déjà curée et testée par le module d'alerte kick.
+  `Modules/CDTracker/Data/<flavor>/Specs.lua` permet d'en déclarer d'autres par
+  classe ; **aucun fichier n'est livré**, et c'est voulu : une estimation ne vaut
+  d'être écrite que si elle est juste. Rien n'est donc affiché comme estimé
+  aujourd'hui — tout ce que tu vois vient de son propriétaire.
+* **Homonymes dans le CD Tracker** : un nom reçu dans un message addon est
+  recollé sur le joueur du roster, y compris quand l'un porte son royaume et pas
+  l'autre. Deux homonymes de royaumes différents dans le même groupe ne sont pas
+  séparables par le nom court : le module refuse alors de trancher (seule la
+  correspondance exacte continue de marcher) plutôt que de les confondre.
 * **Alerte kick sur les clients les plus anciens** : `UnitCastingInfo` ne répond
   rien sur une unité hostile. Le repli lit `SPELL_CAST_START` dans le combat log,
   qui ne dit pas si le sort est protégé — l'alerte assume alors *interruptible*
@@ -351,7 +388,7 @@ tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion 
 Prérequis : `lua5.1` (ou `lua`) et `python3` dans le `PATH`.
 
 La suite charge le vrai code dans un mock d'API WoW et pilote le temps à la
-main : elle vérifie le socle et les quatre modules sur client classic **et**
+main : elle vérifie le socle et les cinq modules sur client classic **et**
 retail, avec et sans `C_Timer`. Le moteur de rencontre y est joué de bout en
 bout sur un raid (Onyxia et ses trois phases), un donjon (difficulté, joueur
 mort pendant que le groupe se bat, wipe) et un world boss (engage par un autre
@@ -362,7 +399,15 @@ versions étrangères ignorés). Ça ne remplace pas un test en jeu, mais ça
 attrape les régressions de logique sans lancer WoW. Les cas qui ont déjà
 cassé en sont : coup de main gauche sur le swing timer, mort du joueur au
 milieu d'un pull, cast de PNJ annulé sans trace dans le combat log, forme
-Classic Era de `UnitCastingInfo`, handler d'event en erreur.
+Classic Era de `UnitCastingInfo`, handler d'event en erreur, et un joueur vu
+sous deux orthographes selon qu'il arrive par le roster ou par un message addon.
+
+Le CD Tracker y est joué de bout en bout : lecture exacte de son propre
+cooldown, GCD écarté, diffusion sur `SPELL_CAST_SUCCESS`, réception d'un pair,
+hiérarchie des sources (une estimation ne parle pas par-dessus une mesure),
+throttle des demandes d'état, oubli d'un joueur qui quitte le groupe, et lecture
+défensive de LibOpenRaid — dont la doc se contredit sur l'ordre de ses retours,
+donc une valeur incohérente est ignorée plutôt qu'affichée.
 
 Les numéros `## Interface` des six `.toc` sont dans `tools/gen-toc.sh` ; ils
 sont à bumper à chaque patch client, sinon l'addon apparaît comme obsolète.
