@@ -101,9 +101,25 @@ function _G.UnitAffectingCombat(unit)
     return u ~= nil and u.combat == true
 end
 function _G.GetRealmName() return "Mock" end
+
 -- 0 = solo, comme le vrai client. Mock.groupSize / Mock.inRaid pilotent le groupe.
+Mock.groupSize = 0
+Mock.inRaid = false
 function _G.GetNumGroupMembers() return Mock.groupSize or 0 end
 function _G.IsInRaid() return Mock.inRaid == true end
+
+-- Instance courante, pilotee par les tests : hors instance par defaut.
+Mock.instance = { name = "Azshara", type = "none", difficulty = 0, difficultyName = nil, instanceId = 0 }
+
+function _G.GetInstanceInfo()
+    local i = Mock.instance
+    return i.name, i.type, i.difficulty, i.difficultyName, 40, 0, false, i.instanceId, nil
+end
+
+function _G.IsInInstance()
+    local t = Mock.instance.type
+    return t ~= "none", t
+end
 
 --------------------------------------------------------------------------------
 -- Spells
@@ -222,8 +238,19 @@ function _G.UnitAura(unit, index)
     return aura.name or (spell and spell.name) or "?", spell and spell.icon, 1, nil,
         10, Mock.now + 10, "boss1", nil, nil, aura.spellId
 end
-function _G.SendAddonMessage() end
+-- Les messages addon envoyes sont conserves : c'est ce qui permet de verifier
+-- ce qu'un joueur annonce a son groupe. Un pair se simule en rejouant
+-- CHAT_MSG_ADDON avec un autre nom d'expediteur.
+Mock.addonMessages = {}
+
+function _G.SendAddonMessage(prefix, message, channel)
+    Mock.addonMessages[#Mock.addonMessages + 1] = { prefix = prefix, message = message, channel = channel }
+end
 function _G.RegisterAddonMessagePrefix() end
+
+function Mock.LastAddonMessage()
+    return Mock.addonMessages[#Mock.addonMessages]
+end
 
 --------------------------------------------------------------------------------
 -- Combat log
@@ -410,8 +437,11 @@ function Mock.InstallRetail()
     }
 
     _G.C_ChatInfo = {
-        SendAddonMessage = function() end,
-        RegisterAddonMessagePrefix = function() end,
+        SendAddonMessage = function(prefix, message, channel)
+            _G.SendAddonMessage(prefix, message, channel)
+            return 0
+        end,
+        RegisterAddonMessagePrefix = function() return 0 end,
     }
 
     _G.C_AddOns = {
@@ -430,6 +460,11 @@ function Mock.InstallRetail()
 
     _G.C_EncounterJournal = {}
     _G.C_LossOfControl = {}
+
+    -- IsEncounterInProgress n'existe que sur les clients recents : c'est le
+    -- signal qui garde une rencontre engagee quand tout le groupe est mort.
+    Mock.encounterInProgress = false
+    _G.IsEncounterInProgress = function() return Mock.encounterInProgress end
     _G.C_NamePlate = {}
     _G.GetSpecialization = function() return 1 end
 end

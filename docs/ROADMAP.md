@@ -414,6 +414,90 @@ end
 
 ---
 
+## Phase 2b — Rencontres : world boss, donjon, raid, phases
+
+Ce que la Phase 2 laissait de côté et qui sépare un « boss timer » d'un boss
+mod : la rencontre a une nature, un début, une fin qualifiée et des phases.
+
+### Nature de la rencontre
+
+- [x] `kind = "raid" | "dungeon" | "world"` dans la data, déduit de
+      `GetInstanceInfo` à défaut (`ns.GetContentKind`).
+- [x] Engage world boss : combat log dans les deux sens — un boss connu qui
+      *encaisse* (`dstGUID`) engage aussi, parce que le combat a souvent commencé
+      sans toi. `INSTANCE_ENCOUNTER_ENGAGE_UNIT` en plus là où il existe.
+- [x] Rencontre à plusieurs boss (`npcIds`) : engage sur n'importe lequel, kill
+      à la mort du dernier.
+- [x] `difficulties` sur un timer ou une phase : filtré à l'engage sur
+      `difficultyId`.
+
+### Fin de combat
+
+`PLAYER_REGEN_ENABLED` ne suffit pas : il se déclenche quand *tu* meurs.
+
+- [x] kill : `UNIT_DIED` de tous les `npcIds`, ou `ENCOUNTER_END` succès.
+- [x] wipe : ticker hors combat, plus personne du groupe en combat
+      (`UnitAffectingCombat` sur `party`/`raid`) pendant un délai de grâce
+      (3 s raid/donjon, 8 s world) ; `IsEncounterInProgress` prime là où il
+      existe. Le ticker **continue** tant que le joueur est hors combat : un
+      joueur mort dont le groupe wipe ensuite ne reçoit plus aucun event.
+- [x] reset : world boss inactif (rien lancé, rien subi) pendant 45 s.
+- [x] zone : `PLAYER_ENTERING_WORLD`, `ZONE_CHANGED_NEW_AREA` vers une autre
+      instance.
+- [x] résumé imprimé : kill/wipe/reset, durée, phase atteinte, vie du boss.
+
+### Phases
+
+- [x] `phases = { ... }` dans la data ; triggers `HEALTH`, `CAST`, `AURA`,
+      `EMOTE`, `DEATH`, `PULL`, `PHASE`.
+- [x] timers restreints (`phase` / `phases`), coupés au changement de phase ;
+      timers `PHASE` relatifs à l'entrée dans la phase.
+- [x] barre « Phase n » vers la phase suivante quand son échéance est connue.
+- [x] annonce plein écran au changement de phase (`Core/Alerts`, clé `boss`).
+- [x] cadre boss / phase / chrono du combat / chrono de phase / vie du boss,
+      déplaçable, avec aperçu en mode test.
+- [x] `/mbs boss phase <n>` pour forcer quand la détection a manqué.
+- [x] `/mbs test boss` rejoue les phases (`testTime`).
+
+### Annonces façon DBM
+
+- [x] `announce` sur un timer : annonce à l'échéance, pré-annonce à
+      `warnBefore`.
+- [x] `countdown = n` : compte à rebours texte n…1.
+- [x] `AURA` avec `on = "player"` : annonce « X SUR TOI » automatique ;
+      `on = "any"` : nom de la cible en sous-titre.
+- [x] rencontre sans data sur Cata+/retail : le cadre et le chrono s'affichent
+      quand même ; montée en gamme vers la data si un boss connu se manifeste.
+
+### Synchronisation entre joueurs (`Core/Comm.lua`)
+
+- [x] couche de messages addon : préfixe `MBS`, canal automatique
+      (`INSTANCE_CHAT` / `RAID` / `PARTY`), version de protocole, filtre d'écho.
+- [x] `PULL` à l'engage (heure du pull, phase) ; un pair qui a vu le pull plus
+      tôt fait reculer le nôtre et rapproche les timers `PULL` d'autant
+      (`ShiftPull`), jamais l'inverse.
+- [x] `PHASE` à chaque changement détecté localement ; appliqué si différent,
+      refusé pour revenir en arrière sur un seuil de vie.
+- [x] `END kill` : la mort du boss vue par un pair termine la rencontre chez
+      ceux qui sont hors de portée du combat log. Le wipe n'est pas synchronisé :
+      chacun le voit par le combat de son groupe.
+- [x] `REQ` à l'arrivée dans un groupe, au login, au changement de zone : un
+      pair engagé répond `PULL` avec l'état courant, après un délai aléatoire,
+      et se tait si quelqu'un a déjà répondu.
+- [x] engage par synchronisation : timers repetitifs recalés sur le bon cycle,
+      phase et heure d'entrée de phase du pair.
+- [x] `/mbs boss sync on|off`, compteurs envoyés / reçus dans `/mbs boss`.
+- [ ] le canal est réutilisable tel quel par le CD Tracker (Phase 5).
+
+### Non fait, et pourquoi
+
+- [ ] **Voix pour le compte à rebours** : fichiers son à produire ou à
+      licencier. Le compte à rebours est texte.
+- [ ] **Data** : Onyxia, Kazzak et Herod sont des références de format ;
+      la couverture réelle vient de `tools/wcl-ingest` (`--kind`, `--zone`).
+
+---
+
 ## Phase 3 — Acquisition de la data
 
 Réordonné par rapport à la version initiale, pour deux raisons : le shim BigWigs ne marche pas, et WarcraftLogs est la seule source qui te donne de la data **par version de jeu**, ce dont tu as besoin de toute façon vu le scope.

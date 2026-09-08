@@ -160,9 +160,12 @@ def render_lua(args, rows, encounter_name: str, used_reports: int) -> str:
         "",
         f"ns.BossTimerData[{args.npc_id}] = {{",
         f'    name    = "{args.boss}",',
+        f'    kind    = "{args.kind}",',
     ]
     if args.encounter:
         lines.append(f"    encounterId = {args.encounter},")
+    if args.zone:
+        lines.append(f'    zone    = "{args.zone}",')
     lines += [
         f"    flavors = {{ {args.flavor} = true }},",
         "    timers  = {",
@@ -207,7 +210,10 @@ def parse_args(argv=None):
     parser.add_argument("--partition", type=int, help="partition WCL (une par version/saison)")
     parser.add_argument("--npc-id", type=int, required=True, help="npcId du boss, cle du fichier de data")
     parser.add_argument("--flavor", required=True, choices=FLAVORS)
-    parser.add_argument("--raid", required=True, help="dossier de raid, ex. Onyxias_Lair")
+    parser.add_argument("--raid", required=True, help="dossier de zone (raid, donjon ou zone de monde), ex. Onyxias_Lair")
+    parser.add_argument("--kind", default="raid", choices=["raid", "dungeon", "world"],
+                        help="nature de la rencontre : raid (defaut), dungeon ou world (world boss)")
+    parser.add_argument("--zone", help="nom de zone affiche par /mbs boss list")
     parser.add_argument("--boss", required=True, help="nom du boss (affichage + nom de fichier)")
     parser.add_argument("--limit", type=int, default=10, help="nombre de logs (defaut 10)")
     parser.add_argument("--min-reports", type=int, default=2,

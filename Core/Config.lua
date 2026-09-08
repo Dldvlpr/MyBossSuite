@@ -239,6 +239,7 @@ local HELP = {
     "  |cffffff00/mbs test|r [anchorKey] — barres factices sur toutes les ancres",
     "  |cffffff00/mbs test stop|r — arrete le mode test",
     "  |cffffff00/mbs test boss <npcId>|r — rejoue la timeline d'un boss hors combat",
+    "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume|sync on/off]",
     "  |cffffff00/mbs anchor|r [<spellId>|remove <spellId>] — ancre dediee pour les barres d'un sort",
     "  |cffffff00/mbs list|r — etat des modules",
     "  |cffffff00/mbs enable|disable|toggle <module>|r",
@@ -642,6 +643,95 @@ local function HandleMove(arg1, arg2)
     end
 end
 
+--------------------------------------------------------------------------------
+-- Module boss timer (/mbs boss)
+--------------------------------------------------------------------------------
+
+local KIND_WORDS = {
+    raid = "raid",
+    donjon = "dungeon", dungeon = "dungeon",
+    world = "world", monde = "world", ["world-boss"] = "world", worldboss = "world",
+}
+
+local KIND_LABELS = { raid = "raid", dungeon = "donjon", world = "world boss" }
+
+local BOSS_FLAGS = {
+    annonces = "announce", annonce = "announce", announce = "announce",
+    compte = "countdown", countdown = "countdown",
+    phases = "phaseAlert", phase_alerte = "phaseAlert", phasealert = "phaseAlert",
+    cadre = "phaseFrame", frame = "phaseFrame",
+    resume = "summary", summary = "summary",
+    son = "sound", sound = "sound",
+    sync = "sync", synchro = "sync",
+}
+
+local function HandleBoss(arg1, arg2)
+    local module = ns:GetModule("bossTimer")
+    if not module then return end
+
+    local option = arg1 and arg1:lower()
+    if not option or option == "" or option == "status" then
+        return PrintStatus(module)
+    end
+
+    local config = module:GetConfig()
+    if not config then return end
+    local value = (arg2 or ""):match("^%S+")
+
+    if option == "list" or option == "liste" then
+        local kind = value and KIND_WORDS[value:lower()] or nil
+        local entries = module:ListData(kind)
+        ns.Print(("rencontres connues (%s) : %d"):format(ns.flavor, #entries))
+        local lastKind
+        for i = 1, #entries do
+            local entry = entries[i]
+            if entry.kind ~= lastKind then
+                lastKind = entry.kind
+                print(("  |cffffff00%s|r"):format(KIND_LABELS[entry.kind] or entry.kind))
+            end
+            local def = entry.def
+            print(("    %d — %s%s  |cffaaaaaa(%d timer(s), %d phase(s))|r%s"):format(
+                entry.npcId, def.name or "?",
+                def.zone and (" — " .. def.zone) or "",
+                #(def.timers or {}), #(def.phases or {}),
+                def.provisional and " |cffff7f00provisoire|r" or ""))
+        end
+        if #entries == 0 then
+            print("    |cffaaaaaa(aucune — voir tools/wcl-ingest)|r")
+        end
+        return
+    end
+
+    if option == "phase" then
+        local index = tonumber(value)
+        if not index then return ns.Print("usage : /mbs boss phase <n>") end
+        if not module.def then
+            return ns.Print("aucune rencontre en cours (ni en test).")
+        end
+        if module.phase == index then
+            ns.Print(("deja en phase %d."):format(index))
+        elseif module:SetPhase(index, "manual") then
+            ns.Print(("phase forcee : %s"):format(module:PhaseLabel()))
+        else
+            ns.Print(("phase %d inconnue pour cette rencontre."):format(index))
+        end
+        return
+    end
+
+    local field = BOSS_FLAGS[option]
+    if not field then
+        ns.Print("usage : /mbs boss [status | list [raid|donjon|world] | phase <n> | "
+            .. "annonces|compte|phases|cadre|resume|son|sync on|off]")
+        return
+    end
+
+    local bool = ParseBool(value)
+    if bool == nil then bool = not (config[field] ~= false) end
+    config[field] = bool
+    if field == "phaseFrame" and not bool then module:HidePhaseFrame() end
+    PrintStatus(module)
+end
+
 SLASH_MYBOSSSUITE1 = "/mbs"
 SLASH_MYBOSSSUITE2 = "/mybosssuite"
 
@@ -681,6 +771,8 @@ SlashCmdList["MYBOSSSUITE"] = function(input)
         HandleKick(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "move" then
         HandleMove(arg1 ~= "" and arg1 or nil, arg2)
+    elseif cmd == "boss" then
+        HandleBoss(arg1 ~= "" and arg1 or nil, arg2)
     elseif cmd == "profile" then
         HandleProfile(arg1 ~= "" and arg1 or nil, arg2 ~= "" and arg2 or nil)
     elseif cmd == "debug" then

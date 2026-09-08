@@ -10,11 +10,12 @@
 # ATTENTION : fichier genere par tools/gen-toc.sh — ne pas editer a la main.
 #
 # L'ordre de load est le seul mecanisme de dependance qui existe :
-# Compat -> Scheduler -> EventBus -> DB -> Anchors -> Bars -> Alerts -> Config -> ModuleLoader -> Modules
+# Compat -> Scheduler -> EventBus -> Comm -> DB -> Anchors -> Bars -> Alerts -> Config -> ModuleLoader -> Modules
 
 Core/Compat.lua
 Core/Scheduler.lua
 Core/EventBus.lua
+Core/Comm.lua
 Core/DB.lua
 Core/Anchors.lua
 Core/Bars.lua
@@ -28,4 +29,6 @@ Modules/InterruptAlert/InterruptAlert.lua
 Modules/MoveAlert/MoveAlert.lua
 
 # Data du flavor vanilla uniquement : aucune data morte chargee sur ce client.
+Modules/BossTimer/Data/vanilla/Blasted_Lands/Lord_Kazzak.lua
 Modules/BossTimer/Data/vanilla/Onyxias_Lair/Onyxia.lua
+Modules/BossTimer/Data/vanilla/Scarlet_Monastery/Herod.lua
