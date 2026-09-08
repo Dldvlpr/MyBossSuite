@@ -24,7 +24,10 @@
 -- dans le combat log qui declenche l'annonce. Tout `spellId` pose sur un timer,
 -- quel que soit son trigger, sert donc a la fois de resynchronisation et
 -- d'affichage : un sort qui tombe a un moment imprevisible n'a que ce
--- moment-la pour se faire voir.
+-- moment-la pour se faire voir. Et une capacite peut n'avoir aucune heure :
+-- `pendingWindow = "phase"` sur un timer de phase dit « possible tant que la
+-- phase dure, jamais garanti » — le souffle d'Onyxia en vol, dont la
+-- probabilite tient a la duree du vol, donc au DPS du raid.
 --
 -- Phases : declarees dans la data, declenchees par seuil de vie, sort, emote,
 -- aura, mort d'un add ou simple delai. Chaque timer peut etre restreint a une
@@ -399,6 +402,20 @@ function M:ShowBar(def, duration)
     })
 end
 
+--- Voyant « c'est possible, maintenant » : une barre a zero, marquee incertaine,
+-- qui attend un evenement au lieu de decompter. C'est ce qu'affiche une capacite
+-- dont on sait qu'elle peut tomber, mais pas quand.
+function M:ShowPendingBar(def)
+    if def.bar == false then return end
+    local group = self:GetGroup(ns:ResolveAnchorKey(def.spellId))
+    group:StartBar(def.key, 0, TimerLabel(def), TimerIcon(def), {
+        color        = def.color or BAR_COLOR,
+        variable     = true,
+        keepOnExpire = true,
+        expiredText  = "?",
+    })
+end
+
 function M:StopBar(def)
     local group = Bars.groups[ns:ResolveAnchorKey(def.spellId)]
     if group then group:StopBar(def.key) end
@@ -441,9 +458,15 @@ function M:StartPending(def)
     def.dueAt   = nil
     local prefix = TimerPrefix(def)
     Scheduler:Cancel(prefix .. "fire")
-    Scheduler:Schedule(prefix .. "pending", def.pendingWindow or PENDING_WINDOW, function()
-        self:EndPending(def)
-    end)
+    self:ShowPendingBar(def)
+    -- `pendingWindow = "phase"` : la capacite reste possible tant que la phase
+    -- dure. Rien a reprogrammer, rien a retirer — c'est le changement de phase
+    -- (ou la fin du combat) qui ferme la fenetre.
+    if def.pendingWindow ~= "phase" then
+        Scheduler:Schedule(prefix .. "pending", def.pendingWindow or PENDING_WINDOW, function()
+            self:EndPending(def)
+        end)
+    end
     EventBus:Fire("BOSS_TIMER_PENDING", def)
 end
 
@@ -486,6 +509,10 @@ function M:FireTimer(def, subtitle, observed)
 
     if def.repeatInterval and not def.once then
         self:ScheduleNext(def, def.repeatInterval)
+    elseif def.pendingWindow == "phase" and not def.once then
+        -- Le souffle est parti ; il reste possible tant que la phase dure. Le
+        -- voyant se rarme derriere lui.
+        self:StartPending(def)
     else
         self:StopBar(def)
     end
@@ -709,7 +736,14 @@ function M:SetPhase(index, reason, elapsed)
                 self:CancelTimerDef(timer)
             elseif timer.trigger == "PHASE" and timer.phase == index and timer.time then
                 local delay = NextDelay(timer, elapsed)
-                if delay then self:ScheduleNext(timer, delay) end
+                if delay then
+                    self:ScheduleNext(timer, delay)
+                elseif timer.variable then
+                    -- `time = 0` (possible des l'entree dans la phase), ou
+                    -- echeance deja passee sur une resynchro tardive : la
+                    -- fenetre s'ouvre tout de suite.
+                    self:StartPending(timer)
+                end
             end
         end
     end
@@ -1629,6 +1663,19 @@ local function ValidateEntry(entry, what, fail, phaseCount)
         fail(("%s : trigger EMOTE sans `pattern`"):format(what))
     elseif trigger == "DEATH" and not entry.npcId then
         fail(("%s : trigger DEATH sans `npcId`"):format(what))
+    end
+    -- `pendingWindow` : duree de la fenetre d'attente d'un timing incertain, ou
+    -- "phase" pour « tant que la phase dure ». Elle n'a de sens que sur un timer
+    -- marque `variable` : ailleurs il y a une echeance, donc rien a attendre.
+    local window = entry.pendingWindow
+    if window ~= nil then
+        if window ~= "phase" and (type(window) ~= "number" or window <= 0) then
+            fail(("%s : `pendingWindow` doit etre un nombre de secondes ou \"phase\""):format(what))
+        elseif not entry.variable then
+            fail(("%s : `pendingWindow` sans `variable`"):format(what))
+        elseif window == "phase" and not (entry.phase or entry.phases) then
+            fail(("%s : `pendingWindow = \"phase\"` sur un timer sans phase"):format(what))
+        end
     end
     if entry.phase and (type(entry.phase) ~= "number" or entry.phase > phaseCount) then
         fail(("%s : `phase` %s hors des phases declarees"):format(what, tostring(entry.phase)))

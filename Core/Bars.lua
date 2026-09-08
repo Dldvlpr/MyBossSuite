@@ -134,7 +134,10 @@ end
 --        expiredText (ce qu'affiche le chrono d'une barre gardee a zero)
 function GroupMixin:StartBar(id, duration, text, icon, opts)
     opts = opts or {}
-    if duration <= 0 then return nil end
+    -- Duree nulle : seule une barre gardee a zero a un sens (elle attend un
+    -- evenement, pas la fin d'un decompte). Ailleurs c'est une erreur d'appel.
+    if duration <= 0 and not opts.keepOnExpire then return nil end
+    if duration < 0 then duration = 0 end
 
     local bar = self.active[id]
     if not bar then

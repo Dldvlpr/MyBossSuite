@@ -671,9 +671,31 @@ ok(generic:GetBar("phase") ~= nil, "barre vers la phase 3")
 equal(generic:GetBar("phase").duration, 30, "phase 3 dans 30s")
 Mock.FireEvent("CHAT_MSG_RAID_BOSS_EMOTE", "Le Conseil rugit encore !", "Conseil des Tests")
 equal(boss.phase, 2, "le meme emote ne rejoue pas la phase")
-Mock.Advance(31)
+
+-- Capacite possible pendant toute la phase : un voyant, pas un decompte.
+Mock.Advance(0.3)
+ok(generic:GetBar("t6") ~= nil, "fenetre de phase : voyant affiche des l'entree")
+equal(generic:GetBar("t6").timeText:GetText(), "?", "voyant en attente, pas un chrono")
+equal(generic:GetBar("t6").label:GetText(), "~Souffle", "voyant marque incertain")
+equal(CountFired("Souffle"), 0, "rien n'est annonce tant que rien n'est lance")
+
+-- Elle tombe : c'est la, et seulement la, que ca crie.
+Mock.FireCombatLog("SPELL_CAST_START", WORLD_GUID, PLAYER_GUID, 99030)
+equal(CountFired("Souffle"), 1, "le cast observe declenche l'annonce")
+equal(bossDisplay.text:GetText(), "SOUFFLE", "annonce plein ecran")
+Mock.Advance(0.3)
+ok(generic:GetBar("t6") ~= nil, "et la fenetre se rarme derriere : ca peut recommencer")
+equal(generic:GetBar("t6").timeText:GetText(), "?", "de nouveau en attente")
+
+-- La fenetre de phase ignore le delai d'attente ordinaire (15 s).
+Mock.Advance(20)
+ok(generic:GetBar("t6") ~= nil, "la fenetre dure autant que la phase")
+equal(CountFired("Souffle"), 1, "et n'annonce toujours rien d'elle-meme")
+
+Mock.Advance(11)
 equal(boss.phase, 3, "phase temporisee atteinte")
 equal(phaseChanges[#phaseChanges], "3:time", "raison : delai")
+equal(generic:GetBar("t6"), nil, "changement de phase : la fenetre se ferme")
 
 -- Auras : sur toi, et sur n'importe qui.
 Mock.FireCombatLog("SPELL_AURA_APPLIED", WORLD_GUID, PLAYER_GUID, 99010, "Marque", "DEBUFF")

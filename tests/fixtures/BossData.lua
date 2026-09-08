@@ -27,6 +27,12 @@ ns.BossTimerData[99001] = {
         { trigger = "AURA", spellId = 99011, on = "any", name = "Bombe", announce = true, bar = false },
         { trigger = "DEATH", npcId = 99020, name = "Add mort", bar = false },
         { trigger = "PHASE", phase = 2, time = 5, name = "Sort de phase 2", bar = true },
+        -- Capacite possible pendant toute la phase 2, jamais garantie : pas une
+        -- echeance, une fenetre. Elle s'ouvre a l'entree dans la phase, se rarme
+        -- derriere chaque occurrence, et ne se ferme qu'au changement de phase.
+        { trigger = "PHASE", phase = 2, time = 0, spellId = 99030, castStart = true,
+          name = "Souffle", variable = true, pendingWindow = "phase",
+          announce = "SOUFFLE", flash = true, bar = true },
     },
 }
 

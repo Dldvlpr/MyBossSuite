@@ -143,11 +143,23 @@ deep = next(t for t, _ in merged if t.get("trigger") == "AURA")
 equal(deep["on"], "player", "`on` survit a la regeneration")
 equal(deep["testTime"], 34, "`testTime` survit a la regeneration")
 
-cast_deep = next(t for t, _ in merged
-                 if t.get("spellId") == 18431 and t.get("trigger") == "CAST")
-equal(cast_deep["announce"], "DEEP BREATH", "`announce` survit a la regeneration")
-equal(cast_deep["flash"], True, "`flash` survit a la regeneration")
-equal(cast_deep["castStart"], True, "`castStart` survit a la regeneration")
+window = next(t for t, _ in merged
+              if t.get("spellId") == 18431 and t.get("trigger") == "PHASE")
+equal(window["announce"], "DEEP BREATH", "`announce` survit a la regeneration")
+equal(window["flash"], True, "`flash` survit a la regeneration")
+equal(window["castStart"], True, "`castStart` survit a la regeneration")
+equal(window["pendingWindow"], "phase", "`pendingWindow` survit a la regeneration")
+
+# `pendingWindow` dit : cette capacite n'a pas d'heure, elle a une fenetre. Les
+# logs mesurent pourtant toujours quelque chose (la mediane des souffles vus, la
+# cadence des ticks du souffle lui-meme) : l'ecrire ici transformerait la
+# fenetre en echeance fausse. La mesure s'affiche en commentaire, elle ne
+# s'ecrit pas dans le timer.
+breathed = wi.merge_timer(dict(window), row(18431, 47.5, interval=1.5, variable=True))
+equal(breathed["time"], 0, "fenetre : le `time` ecrit a la main est intact")
+ok("repeatInterval" not in breathed, "fenetre : aucune cadence n'y est ecrite")
+equal(breathed["pendingWindow"], "phase", "fenetre : elle reste une fenetre")
+equal(breathed["variable"], True, "fenetre : elle reste incertaine")
 
 # Le meme sort, mais bascule en CAST : le delai depuis le pull devient du bruit
 # et doit disparaitre plutot que de rester en place, perime.
@@ -182,6 +194,15 @@ ok('{ name = "Vol", trigger = "HEALTH", threshold = 0.65' in lua,
    "une phase est emise sur une ligne, champs dans l'ordre")
 ok(re.search(r'announce\s+= "DEEP BREATH",', lua), "`announce` est bien emis")
 ok("conserve : spell 18435 absent des logs" in lua, "un sort non revu est signale")
+ok(re.search(r'pendingWindow\s+= "phase",', lua), "`pendingWindow` est bien emis")
+
+# La mesure d'un sort en fenetre reste visible — c'est une information — mais le
+# commentaire dit explicitement qu'elle n'a pas ete ecrite dans le timer.
+with_breath = wi.merge_timers(old_timers, rows + [row(18431, 47.5, interval=1.5)])
+lua_breath = wi.render_lua(args, header, with_breath, "Onyxia", 7)
+ok("fenetre ecrite a la main : la mesure est affichee, pas ecrite" in lua_breath,
+   "une mesure ecartee par une fenetre est signalee")
+ok(re.search(r'pendingWindow\s+= "phase",', lua_breath), "et la fenetre est intacte")
 
 # Idempotence : regenerer deux fois de suite avec les memes mesures doit donner
 # exactement le meme fichier, sinon chaque passage produit un faux diff et on

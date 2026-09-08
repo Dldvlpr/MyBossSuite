@@ -341,7 +341,7 @@ FIELD_ORDER = (
     "trigger", "time", "phase", "phases", "spellId", "castStart",
     "threshold", "pattern", "npcId", "on", "event",
     "name", "difficulties", "repeatInterval", "warnBefore", "once",
-    "announce", "countdown", "flash", "bar", "variable",
+    "announce", "countdown", "flash", "bar", "variable", "pendingWindow",
     "testTime", "color", "icon", "key", "provisional",
 )
 
@@ -454,6 +454,15 @@ def merge_timer(existing: dict, row):
     """Reecrit les champs mesures d'un timer, conserve tout le reste."""
     merged = dict(existing)
     if row is None:
+        return merged
+
+    # `pendingWindow` est une affirmation ecrite a la main : cette capacite n'a
+    # pas d'heure, elle a une fenetre (le souffle d'Onyxia en vol, possible tant
+    # que la phase dure, jamais garanti). Les logs, eux, mesurent toujours
+    # quelque chose — la mediane des souffles observes, la cadence des ticks du
+    # souffle lui-meme — et l'ecrire ici transformerait la fenetre en echeance
+    # fausse au premier passage. On ne touche a rien.
+    if merged.get("pendingWindow") is not None:
         return merged
 
     trigger = merged.get("trigger", "PULL")
@@ -602,6 +611,11 @@ def render_timer(timer, row, merged_existing: bool):
                 "        -- phase %s non situee dans ces logs : `time` reste ecrit"
                 " a la main" % timer.get("phase", "?")
             )
+        if timer.get("pendingWindow") is not None:
+            lines.append(
+                "        -- fenetre ecrite a la main : la mesure est affichee, pas"
+                " ecrite dans le timer"
+            )
         if row.get("phaseGated") and origin == "pull" and timer.get("trigger") == "PULL":
             # Le generateur signale, il ne tranche pas : convertir en `PHASE`
             # demande de savoir QUELLE phase, ce qu'un delta depuis le pull ne
@@ -637,7 +651,9 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
         "-- deterministe. Leur `time` n'est pas une echeance mais le moment ou la",
         "-- capacite redevient possible : la barre s'affiche comme incertaine, elle",
         "-- reste a zero sans rien annoncer une fois l'estimation ecoulee, et c'est le",
-        "-- cast observe dans le combat log qui declenche l'annonce.",
+        "-- cast observe dans le combat log qui declenche l'annonce. Un timer qui",
+        "-- porte `pendingWindow` va plus loin : sa capacite n'a pas d'heure du tout,",
+        "-- la mesure ne s'y ecrit pas et le timer traverse la regeneration intact.",
         "--",
         "-- Un timer PHASE compte depuis l'entree dans sa phase : il n'est mesure que",
         "-- si cette borne a pu etre situee dans le log (seuil de vie rejoue, cast",

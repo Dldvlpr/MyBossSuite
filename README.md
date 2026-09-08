@@ -243,6 +243,17 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   chrono `?`, pré-alerte et compte à rebours muets —, et c'est le cast réel qui
   déclenche l'annonce. Passé 15 s sans rien voir, le cycle d'estimation repart :
   un sort jamais observé ne doit pas faire taire son timer pour de bon.
+* **Une capacité peut n'avoir aucune heure du tout : `pendingWindow = "phase"`.**
+  Le souffle d'Onyxia en vol n'est pas en retard, il est *possible* — et
+  d'autant plus probable que la phase 2 dure, donc c'est le DPS du raid qui
+  décide s'il tombe une fois, trois fois ou jamais. Un timer `PHASE` marqué
+  `variable` + `pendingWindow = "phase"` affiche alors un voyant « c'est
+  possible » (barre à zéro, `~`, chrono `?`) de l'entrée dans la phase jusqu'à
+  sa sortie, se réarme derrière chaque occurrence, et n'annonce jamais que le
+  cast réel. `wcl-ingest` n'y touche pas à la régénération : les logs mesurent
+  toujours *quelque chose* (la médiane des souffles observés, la cadence des
+  ticks du souffle lui-même), et l'écrire transformerait la fenêtre en échéance
+  fausse. La mesure sort en commentaire, pas dans le timer.
 * **Alerte kick : trois conditions, vérifiées en continu.** Cible (ou focus) en
   incantation, incantation non protégée, **et** ton interrupt réellement
   disponible et à portée. Un ticker de 0,15 s tourne pendant l'incantation, parce

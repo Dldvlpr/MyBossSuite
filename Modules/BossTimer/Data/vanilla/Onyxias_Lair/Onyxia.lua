@@ -8,6 +8,14 @@
 -- Les phases, elles, ne sont pas des timings : Onyxia decolle a 65 % et se
 -- repose a 40 %, c'est la mecanique du combat, pas une mesure.
 --
+-- Le souffle de la phase 2 n'a pas d'heure non plus, et n'a meme pas de
+-- certitude : il devient possible des qu'elle est en l'air, et il tombe
+-- d'autant plus souvent que le vol dure. Une phase 2 expediee peut n'en voir
+-- aucun. Ca ne s'ecrit donc pas en `time` — aucun chiffre ne serait vrai —
+-- mais en fenetre : `variable` + `pendingWindow = "phase"`. Le module affiche
+-- un voyant « c'est possible » du decollage a l'atterrissage, sans jamais
+-- annoncer un souffle qui n'a pas eu lieu, et crie DEEP BREATH au cast reel.
+--
 -- Cle = npcId, jamais le nom : le nom du boss est localise (clients FR/DE/RU),
 -- indexer dessus casse des qu'on sort d'un client EN. `name` est un champ
 -- d'affichage uniquement.
@@ -43,7 +51,7 @@ ns.BossTimerData[10184] = {
             variable       = true,
             provisional    = true,
         },
-        -- Phase 2 : Fireball Volley au cast, Deep Breath annonce quand il part.
+        -- Phase 2 : Fireball Volley au cast, Deep Breath en fenetre de vol.
         {
             trigger     = "CAST",
             spellId     = 18435,
@@ -54,17 +62,24 @@ ns.BossTimerData[10184] = {
             testTime    = 25,
             provisional = true,
         },
+        -- Possible des le decollage (`time = 0`), jamais garanti, et de nouveau
+        -- possible apres chacun : la fenetre se rarme derriere le souffle qui
+        -- vient de partir et ne se ferme qu'a l'atterrissage. Le voyant reste
+        -- affiche, marque incertain ; seul le cast reel declenche l'annonce.
         {
-            trigger     = "CAST",
-            spellId     = 18431,
-            castStart   = true,
-            name        = "Deep Breath",
-            phase       = 2,
-            announce    = "DEEP BREATH",
-            flash       = true,
-            bar         = false,
-            testTime    = 30,
-            provisional = true,
+            trigger       = "PHASE",
+            time          = 0,
+            phase         = 2,
+            spellId       = 18431,
+            castStart     = true,
+            name          = "Deep Breath",
+            variable      = true,
+            pendingWindow = "phase",
+            announce      = "DEEP BREATH",
+            flash         = true,
+            bar           = true,
+            testTime      = 30,
+            provisional   = true,
         },
         -- Phase 3 : Flame Breath reprend, relatif a l'atterrissage.
         {
