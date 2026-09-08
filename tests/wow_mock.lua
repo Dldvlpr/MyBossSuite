@@ -96,9 +96,30 @@ function _G.UnitIsDead(unit)
     return u ~= nil and u.dead == true
 end
 function _G.UnitIsDeadOrGhost(unit) return UnitIsDead(unit) end
+function _G.UnitAffectingCombat(unit)
+    local u = Mock.units[unit]
+    return u ~= nil and u.combat == true
+end
 function _G.GetRealmName() return "Mock" end
-function _G.GetNumGroupMembers() return 1 end
-function _G.IsInRaid() return false end
+
+-- Groupe : Mock.groupSize compte le joueur ; Mock.inRaid bascule party/raid.
+Mock.groupSize = 1
+Mock.inRaid = false
+function _G.GetNumGroupMembers() return Mock.groupSize end
+function _G.IsInRaid() return Mock.inRaid end
+
+-- Instance courante, pilotee par les tests : hors instance par defaut.
+Mock.instance = { name = "Azshara", type = "none", difficulty = 0, difficultyName = nil, instanceId = 0 }
+
+function _G.GetInstanceInfo()
+    local i = Mock.instance
+    return i.name, i.type, i.difficulty, i.difficultyName, 40, 0, false, i.instanceId, nil
+end
+
+function _G.IsInInstance()
+    local t = Mock.instance.type
+    return t ~= "none", t
+end
 
 --------------------------------------------------------------------------------
 -- Spells
@@ -410,6 +431,11 @@ function Mock.InstallRetail()
 
     _G.C_EncounterJournal = {}
     _G.C_LossOfControl = {}
+
+    -- IsEncounterInProgress n'existe que sur les clients recents : c'est le
+    -- signal qui garde une rencontre engagee quand tout le groupe est mort.
+    Mock.encounterInProgress = false
+    _G.IsEncounterInProgress = function() return Mock.encounterInProgress end
     _G.C_NamePlate = {}
     _G.GetSpecialization = function() return 1 end
 end

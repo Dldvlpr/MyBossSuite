@@ -387,6 +387,66 @@ ns.IsInRaidGroup = function()
     return (GetNumRaidMembers and GetNumRaidMembers() or 0) > 0
 end
 
+--- Prefixe et nombre des unites de groupe (hors joueur) : "raid", N ou
+-- "party", N-1. Un seul point de verite pour parcourir le groupe, quel que
+-- soit le client.
+function ns.GroupUnitPrefix()
+    if ns.IsInRaidGroup() then return "raid", ns.GetNumGroupMembers() end
+    local members = ns.GetNumGroupMembers()
+    return "party", math.max(0, members - 1)
+end
+
+--------------------------------------------------------------------------------
+-- Combat et instance
+--------------------------------------------------------------------------------
+-- Ce qui permet de distinguer un wipe d'une simple sortie de combat : en donjon
+-- ou en raid, on est mort mais le groupe se bat toujours ; sur un world boss,
+-- on peut sortir de combat sans que le boss soit reset.
+
+ns.UnitAffectingCombat = _G.UnitAffectingCombat or function() return false end
+
+-- IsEncounterInProgress n'existe pas sur les clients les plus anciens : nil
+-- signifie "le client ne sait pas", jamais "pas de rencontre en cours".
+ns.IsEncounterInProgress = _G.IsEncounterInProgress
+
+--- Groupe en combat ? Le joueur d'abord (le cas le plus frequent), puis chaque
+-- membre : tant qu'un seul se bat, la rencontre n'est pas finie.
+function ns.IsGroupInCombat()
+    if ns.UnitAffectingCombat("player") then return true end
+    local prefix, count = ns.GroupUnitPrefix()
+    for i = 1, count do
+        if ns.UnitAffectingCombat(prefix .. i) then return true end
+    end
+    return false
+end
+
+--- Forme unique : name, instanceType ("none"/"party"/"raid"/"pvp"/"arena"/
+-- "scenario"), difficultyId, difficultyName, instanceId.
+-- GetInstanceInfo manque sur les tout premiers builds : on retombe sur
+-- IsInInstance, qui ne connait ni la difficulte ni l'id.
+function ns.GetInstanceInfo()
+    if _G.GetInstanceInfo then
+        local name, instanceType, difficultyId, difficultyName, _, _, _, instanceId =
+            GetInstanceInfo()
+        return name, instanceType or "none", difficultyId or 0, difficultyName, instanceId or 0
+    end
+    local inInstance, instanceType = false, "none"
+    if _G.IsInInstance then
+        inInstance, instanceType = IsInInstance()
+    end
+    local name = (_G.GetRealZoneText and GetRealZoneText()) or "?"
+    return name, (inInstance and instanceType) or "none", 0, nil, 0
+end
+
+--- Nature du contenu ou se trouve le joueur : "raid", "dungeon" ou "world".
+-- Sert de valeur par defaut quand une entree de data ne precise pas `kind`.
+function ns.GetContentKind()
+    local _, instanceType = ns.GetInstanceInfo()
+    if instanceType == "raid" then return "raid" end
+    if instanceType == "party" then return "dungeon" end
+    return "world"
+end
+
 --------------------------------------------------------------------------------
 -- Table de capacites
 --------------------------------------------------------------------------------
@@ -405,6 +465,13 @@ ns.has = {
     nativeTimers        = hasNativeTimer,
     -- Le parry haste (swing en cours ampute) n'existe plus en retail.
     parryHaste          = not ns.isRetail,
+    -- IsEncounterInProgress : le client sait dire si un boss est engage, ce
+    -- qui rend la detection de wipe fiable meme quand tout le groupe est mort.
+    encounterProgress   = _G.IsEncounterInProgress ~= nil,
+    instanceInfo        = _G.GetInstanceInfo ~= nil,
+    -- Unites nameplate1..40 : en classic c'est souvent le seul moyen de lire la
+    -- vie d'un boss qu'on ne cible pas.
+    namePlateUnits      = ns.EventExists("NAME_PLATE_UNIT_ADDED"),
 }
 
 --------------------------------------------------------------------------------

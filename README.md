@@ -14,6 +14,7 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 0 bis | Anchors, mode unlock, mode test | fait |
 | 1 | Format de data boss timer | fait |
 | 2 | Runtime engine boss timer | fait |
+| 2b | Rencontres : world boss, donjon, raid ; phases, annonces, wipe/kill | fait |
 | 3a | `tools/wcl-ingest` (WarcraftLogs) | outil écrit, **data à générer** |
 | 3b | `tools/wa-extract` (WeakAuras perso) | outil écrit |
 | 3c | Extraction depuis DBM/BigWigs | non fait — décision de licence à trancher |
@@ -26,6 +27,12 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 Livrable atteint : **un addon installable, configurable, avec quatre modules
 fonctionnels** (Swing Timer, Boss Timer, alerte Kick, alerte Move), plutôt que
 six modules à moitié faits.
+
+Le Boss Timer est un vrai moteur de rencontre, du niveau de ce qu'on attend
+d'un DBM ou d'un BigWigs : raid, donjon et world boss, phases visibles avec
+chrono, annonces plein écran et compte à rebours, distinction kill / wipe /
+reset, et un cadre boss / phase / vie. Ce qui lui manque encore par rapport à
+eux tient à la **data**, pas au moteur : voir « Limites assumées ».
 
 ## Installation
 
@@ -41,19 +48,29 @@ chaque client charge celui qui correspond à son suffixe.
 | `/mbs reset` | remet toutes les positions par défaut |
 | `/mbs test` | barres factices en boucle sur chaque ancre |
 | `/mbs test <anchorKey>` | idem, sur une seule ancre |
-| `/mbs test boss <npcId>` | rejoue la timeline d'un boss hors combat |
+| `/mbs test boss <npcId>` | rejoue la timeline d'un boss hors combat, phases comprises |
 | `/mbs test stop` | arrête le mode test |
 | `/mbs list` | état des modules |
 | `/mbs enable\|disable\|toggle <module>` | activation à chaud |
 | `/mbs profile [nom\|list\|copy <nom>\|reset]` | gestion des profils |
 | `/mbs debug` | messages de debug |
 
-### Alertes (kick et move)
+### Boss Timer
+
+| Commande | Effet |
+|---|---|
+| `/mbs boss` | rencontre en cours (nature, phase, chrono, vie), data chargée, réglages |
+| `/mbs boss list [raid\|donjon\|world]` | rencontres connues sur ce client, par nature |
+| `/mbs boss phase <n>` | force la phase (en combat ou en test) si la détection a manqué |
+| `/mbs boss annonces\|compte\|phases\|cadre\|resume\|son on\|off` | annonces des timers, compte à rebours, annonce de phase, cadre boss/phase, résumé de fin de combat, son |
+| `/mbs alert boss ...` | texte, couleur, taille, son de l'annonce boss (voir ci-dessous) |
+
+### Alertes (kick, move et annonce boss)
 
 | Commande | Effet |
 |---|---|
 | `/mbs alert` | liste les alertes et leurs réglages |
-| `/mbs alert <kick\|move> test` | joue l'alerte telle quelle, son compris |
+| `/mbs alert <kick\|move\|boss> test` | joue l'alerte telle quelle, son compris |
 | `/mbs alert <clé> texte <texte>` | change le texte affiché (`KICK`, `MOVE`, ce que tu veux) |
 | `/mbs alert <clé> couleur <r> <g> <b>` | couleur du texte et du flash (0 à 1) |
 | `/mbs alert <clé> taille <n>` / `duree <n>` | taille de police, durée d'affichage |
@@ -74,8 +91,8 @@ chaque client charge celui qui correspond à son suffixe.
 Presets de son : `raidwarning`, `readycheck`, `alarm`, `ping`, `murloc`. Un id de
 SOUNDKIT (`/mbs alert kick son 8959`) ou un chemin de fichier
 (`/mbs alert move son Interface\AddOns\Perso\move.ogg`) font aussi l'affaire.
-Les deux alertes se déplacent comme le reste : `/mbs unlock`, puis `/mbs test`
-pour les faire apparaître hors combat.
+Les trois alertes se déplacent comme le reste : `/mbs unlock`, puis `/mbs test`
+pour les faire apparaître hors combat — le cadre boss/phase aussi.
 
 ## Architecture
 
@@ -114,6 +131,14 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
 * **`Core/ModuleLoader.lua`** — un fichier de module *déclare*, le loader
   *décide*. `OnDisable` coupe events, timers et frames ; le loader repasse
   derrière en filet de sécurité.
+* **`Modules/BossTimer/BossTimer.lua`** — le moteur de rencontre. Engage par
+  `ENCOUNTER_START`, unités `boss1..5` ou combat log (un boss connu qui agit
+  **ou qui encaisse**, cas du world boss déjà engagé par d'autres). Tables de
+  recherche construites une fois à l'engage (`castTriggers`, `auraTriggers`,
+  `deathTriggers`…), zéro allocation dans le handler de combat log. Phases,
+  timers restreints par phase et par difficulté, annonces, compte à rebours,
+  cadre boss/phase/chrono/vie, et fin de combat qualifiée : kill, wipe, reset,
+  changement de zone. Format complet dans `Modules/BossTimer/Data/README.md`.
 
 ## Décisions prises
 
@@ -160,15 +185,47 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
 * **Alerte = frame dédiée, la barre reste une barre.** `warnBefore` continue de
   faire passer une barre en rouge ; les alertes kick et move passent par
   `Core/Alerts.lua`, avec son et visuel réglables séparément.
+* **Mourir ne termine pas une rencontre.** `PLAYER_REGEN_ENABLED` se déclenche
+  quand *tu* sors de combat — donc quand tu meurs, alors que le groupe se bat
+  encore. La fin de combat est décidée par le groupe : plus personne en combat
+  pendant un délai de grâce (3 s en raid/donjon, 8 s sur un world boss), et
+  `IsEncounterInProgress` là où le client sait répondre. Un joueur mort garde
+  ses timers, et un wipe est annoncé comme un wipe, avec la phase et la vie du
+  boss.
+* **Un world boss se détecte au premier coup, dans un sens ou dans l'autre.**
+  Pas d'`ENCOUNTER_START` en classic, pas d'unité `boss1`, et souvent le combat
+  a commencé sans toi : un boss connu qui *se fait* taper engage la rencontre
+  aussi sûrement qu'un boss qui tape. Un world boss qui ne fait plus rien et ne
+  subit plus rien pendant 45 s a été reset : la rencontre se ferme d'elle-même.
+* **Les phases sont de la data, pas du code.** Seuil de vie, sort, emote, aura,
+  mort d'un add ou simple délai : chaque phase déclare son déclencheur, chaque
+  timer déclare ses phases. Changer de phase coupe ce qui n'a plus lieu d'être
+  et lance ce qui est relatif à l'entrée dans la phase. Rien n'est câblé en dur
+  par boss dans le module.
+* **Une rencontre sans data affiche quand même le chrono.** Sur Cata+/retail,
+  `ENCOUNTER_START` ouvre le cadre boss/phase même sans fichier de data ; si un
+  boss connu se manifeste ensuite, la rencontre monte en gamme sans perdre
+  l'heure du pull.
 
 ## Limites assumées
 
-* **Seuils `HEALTH` en classic** : il n'y a pas d'unité `boss1..5`, seulement
-  `target`/`focus`/`mouseover`. Le module sonde ces unités pendant l'engage —
-  la détection est donc structurellement moins fiable qu'en Cata+/retail. C'est
+* **Seuils `HEALTH` en classic** : il n'y a pas d'unité `boss1..5`. Le module
+  sonde `target`, `focus`, `mouseover`, les nameplates et les cibles du groupe
+  pendant l'engage — la détection est donc structurellement moins fiable qu'en
+  Cata+/retail, pour les phases à seuil de vie comme pour les timers. C'est
   documenté plutôt que maquillé.
-* **La data d'Onyxia livrée est provisoire** : elle sert de référence de format.
-  Elle doit être régénérée par `tools/wcl-ingest` avant tout usage sérieux.
+* **World boss engagé avant ton arrivée** : les timers `PULL` comptent depuis
+  *ta* détection, pas depuis le vrai pull. DBM corrige ça par une
+  synchronisation entre joueurs ; il n'y en a pas ici (pas de comm addon), les
+  timers resynchronisés sur un cast observé se recalent seuls.
+* **Emotes localisés** : un déclencheur `EMOTE` cherche un fragment de texte
+  dans la langue du client. La data livrée ne garantit rien hors du client où
+  elle a été écrite.
+* **La data livrée (Onyxia, Kazzak, Herod) est provisoire** : elle sert de
+  référence de format pour un raid, un world boss et un donjon. Elle doit être
+  régénérée par `tools/wcl-ingest` avant tout usage sérieux. Ce qui sépare
+  encore l'addon d'un DBM à jour, c'est la couverture en data — le moteur, lui,
+  sait déjà tout jouer.
 * **Swing timer** : main-hand uniquement. Le combat log ne distingue pas les
   coups de main gauche sur `SWING_DAMAGE`.
 * **Précision du CD Tracker** (quand il existera) : Blizzard bloque la lecture
@@ -201,7 +258,7 @@ Compat → Scheduler → EventBus → DB → Anchors → Bars → Alerts → Con
 
 ```bash
 tools/gen-toc.sh            # régénère les 6 .toc (--check en CI)
-tools/wcl-ingest/wcl_ingest.py --help    # timings boss
+tools/wcl-ingest/wcl_ingest.py --help    # timings boss (--kind raid|dungeon|world)
 tools/wcl-ingest/wcl_alerts.py --help    # sorts kickables + zones à fuir
 tools/wa-extract/wa_extract.py count WeakAuras.lua
 ```
@@ -233,8 +290,12 @@ tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion 
 
 La suite charge le vrai code dans un mock d'API WoW et pilote le temps à la
 main : elle vérifie le socle et les quatre modules sur client classic **et**
-retail, avec et sans `C_Timer`. Ça ne remplace pas un test en jeu, mais ça
-attrape les régressions de logique sans lancer WoW.
+retail, avec et sans `C_Timer`. Le moteur de rencontre y est joué de bout en
+bout sur un raid (Onyxia et ses trois phases), un donjon (difficulté, joueur
+mort pendant que le groupe se bat, wipe) et un world boss (engage par un autre
+joueur, conseil à deux boss, emote, aura sur toi, compte à rebours, reset par
+inactivité). Ça ne remplace pas un test en jeu, mais ça attrape les régressions
+de logique sans lancer WoW.
 
 `tests/test_wcl_alerts.py` teste séparément le **classement** de l'ingestion, sur
 des logs synthétiques et sans réseau : une zone au sol doit être retenue, un DoT,

@@ -1,15 +1,47 @@
 -- Modules/BossTimer/BossTimer.lua
--- Moteur runtime du boss timer.
+-- Moteur de rencontre : timers, phases, annonces, detection d'engage et de fin
+-- de combat — en raid, en donjon et sur les world boss.
 --
 -- Detection d'engage : ENCOUNTER_START partout ou il existe (Cata Classic, MoP
--- Classic, retail — pas seulement retail), combat log en second filet, flag
--- `engaged` pour que les deux ne declenchent pas deux fois.
+-- Classic, retail), unites boss1..5 quand elles apparaissent, combat log en
+-- dernier filet (un boss connu qui lance un sort, tape, ou *se fait* taper —
+-- ce dernier cas est celui du world boss qu'un autre groupe a deja engage).
+--
+-- Fin de combat : ce n'est plus PLAYER_REGEN_ENABLED qui tranche. Mourir sort
+-- du combat, et pourtant le groupe se bat toujours : les timers doivent
+-- survivre a la mort du joueur. On distingue :
+--   * kill   : UNIT_DIED de tous les npcIds de la rencontre, ou ENCOUNTER_END
+--              avec succes ;
+--   * wipe   : plus personne du groupe en combat pendant un delai de grace (et
+--              IsEncounterInProgress dit non, la ou le client sait repondre) ;
+--   * reset  : world boss qui n'a rien fait ni subi depuis un moment (evade) ;
+--   * zone   : changement de zone / reload.
+--
+-- Phases : declarees dans la data, declenchees par seuil de vie, sort, emote,
+-- aura, mort d'un add ou simple delai. Chaque timer peut etre restreint a une
+-- ou plusieurs phases ; changer de phase coupe les timers qui n'y ont pas leur
+-- place et lance ceux relatifs a l'entree dans la phase.
 
 local _, ns = ...
 
+local Alerts = ns.Alerts
+
 local M = ns:NewModule("bossTimer", {
-    enabled = true,
-    sound   = true,
+    enabled    = true,
+    sound      = true,    -- son a l'echeance d'un timer sans annonce dediee
+    announce   = true,    -- annonces plein ecran des timers marques `announce`
+    countdown  = true,    -- compte a rebours texte (3, 2, 1) avant l'echeance
+    phaseAlert = true,    -- annonce a chaque changement de phase
+    phaseFrame = true,    -- cadre boss / phase / chrono
+    summary    = true,    -- resume en fin de combat (kill, wipe, duree)
+    alert = Alerts.MakeDefaults({
+        text      = "BOSS",
+        color     = { 1, 0.6, 0.2 },
+        fontSize  = 40,
+        duration  = 2,
+        flash     = false,
+        soundName = "raidwarning",
+    }),
 })
 M.title = "Boss Timer"
 
@@ -25,20 +57,82 @@ ns.BossTimerEncounter = ns.BossTimerEncounter or {}
 local BossTimerData      = ns.BossTimerData
 local BossTimerEncounter = ns.BossTimerEncounter
 
+-- [npcId] = npcId principal : une rencontre a plusieurs boss (conseil) se
+-- declare une fois, sous le premier, avec les autres dans `npcIds`.
+local BossTimerAlias = {}
+ns.BossTimerAlias = BossTimerAlias
+
 local GENERIC_ANCHOR = "BossTimer_GenericBar"
-local BAR_COLOR      = { 0.25, 0.55, 0.9 }
+local PHASE_ANCHOR   = "BossTimer_Phase"
+local ALERT_KEY      = "boss"
+local ALERT_ANCHOR   = "BossTimer_Display"
+
+local BAR_COLOR   = { 0.25, 0.55, 0.9 }
+local PHASE_COLOR = { 0.75, 0.35, 0.9 }
 
 local HEALTH_POLL_INTERVAL = 0.5
+local WIPE_POLL_INTERVAL   = 1
+
+-- Delai de grace hors combat avant de conclure au wipe. Plus long sur un world
+-- boss : on peut en sortir (mort, fuite) pendant qu'il reste engage.
+local WIPE_GRACE = { raid = 3, dungeon = 3, world = 8 }
+
+-- Inactivite du boss (rien lance, rien subi) avant de conclure a un reset. Ne
+-- s'applique par defaut qu'aux world boss : en raid, une phase de transition
+-- (boss submerge, invulnerable) peut durer bien plus longtemps.
+local INACTIVITY = { world = 45 }
+local WATCHDOG_INTERVAL = 5
+
+local VALID_KINDS = { raid = true, dungeon = true, world = true }
+
+local EMOTE_EVENTS = {
+    "CHAT_MSG_RAID_BOSS_EMOTE",
+    "CHAT_MSG_RAID_BOSS_WHISPER",
+    "CHAT_MSG_MONSTER_YELL",
+    "CHAT_MSG_MONSTER_EMOTE",
+}
+
+local EMPTY = {}
 
 --------------------------------------------------------------------------------
 -- Etat de pull
 --------------------------------------------------------------------------------
 
-M.engaged       = nil    -- npcId
-M.bossGUID      = nil
-M.castTriggers  = nil    -- [spellId] = timerDef, construit une fois a l'engage
-M.healthTriggers = nil
-M.pullTime      = 0
+M.engaged        = nil    -- npcId principal (ou "encounter:<id>" sans data)
+M.def            = nil
+M.kind           = nil    -- "raid" | "dungeon" | "world", effectif
+M.bossGUID       = nil
+M.pullTime       = 0
+M.phase          = nil
+M.phaseTime      = 0
+M.lastHealthPct  = nil
+M.npcSet         = nil    -- [npcId] = true, toute unite de la rencontre
+M.alive          = nil    -- [npcId] = true, celles qu'il reste a tuer
+M.castTriggers   = nil    -- [spellId] = { entree, ... }
+M.auraTriggers   = nil    -- [spellId] = { entree, ... }
+M.deathTriggers  = nil    -- [npcId]   = { entree, ... }
+M.emoteTriggers  = nil    -- { entree, ... }
+M.healthTriggers = nil    -- { entree, ... }
+
+--------------------------------------------------------------------------------
+-- Formatage
+--------------------------------------------------------------------------------
+
+local function FormatClock(seconds)
+    if not seconds or seconds < 0 then seconds = 0 end
+    return ("%d:%02d"):format(math.floor(seconds / 60), math.floor(seconds % 60))
+end
+M.FormatClock = FormatClock
+
+local function TimerLabel(def)
+    return def.name or (def.spellId and ns.GetSpellName(def.spellId)) or "?"
+end
+
+local function TimerIcon(def)
+    if def.icon then return def.icon end
+    if def.spellId then return ns.GetSpellTexture(def.spellId) end
+    return nil
+end
 
 --------------------------------------------------------------------------------
 -- Groupes de bars
@@ -47,7 +141,7 @@ M.pullTime      = 0
 local function TestGenericBars(group)
     Bars:TestBar(group, "boss1", 12, "Flame Breath", nil, BAR_COLOR)
     Bars:TestBar(group, "boss2", 25, "Fireball Volley", nil, BAR_COLOR)
-    Bars:TestBar(group, "boss3", 40, "Deep Breath", nil, { 0.8, 0.3, 0.8 })
+    Bars:TestBar(group, "boss3", 40, "Phase 2", nil, PHASE_COLOR)
 end
 
 function M:GetGroup(anchorKey)
@@ -84,20 +178,137 @@ function M:ClearBars()
 end
 
 --------------------------------------------------------------------------------
+-- Cadre de phase
+--------------------------------------------------------------------------------
+-- Nom du boss, phase courante, chrono du combat et de la phase, vie du boss.
+-- Une seule ligne d'information, mise a jour cinq fois par seconde : c'est ce
+-- qu'on regarde entre deux barres.
+
+local PHASE_FRAME_REFRESH = 0.2
+
+function M:GetPhaseFrame()
+    if self.phaseFrame then return self.phaseFrame end
+
+    local frame = CreateFrame("Frame", nil, UIParent)
+    frame:SetSize(240, 36)
+    frame:Hide()
+
+    local bg = frame:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints(frame)
+    ns.SetSolidColor(bg, 0, 0, 0, 0.55)
+
+    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, -4)
+    title:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -6, -4)
+    title:SetJustifyH("LEFT")
+    frame.title = title
+
+    local clock = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    clock:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 6, 4)
+    clock:SetJustifyH("LEFT")
+    frame.clock = clock
+
+    local health = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    health:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -6, 4)
+    health:SetJustifyH("RIGHT")
+    frame.health = health
+
+    frame.sinceRefresh = 0
+    frame:SetScript("OnUpdate", function(f, elapsed)
+        f.sinceRefresh = f.sinceRefresh + elapsed
+        if f.sinceRefresh < PHASE_FRAME_REFRESH then return end
+        f.sinceRefresh = 0
+        M:RefreshPhaseFrame()
+    end)
+
+    ns.Anchors:Register(frame, PHASE_ANCHOR, {
+        label        = "Boss Timer - phase",
+        defaultPoint = { "CENTER", "UIParent", "CENTER", 300, 110 },
+        test         = function() M:TestPhaseFrame() end,
+    })
+
+    self.phaseFrame = frame
+    return frame
+end
+
+--- Libelle de la phase courante : "Phase 2/3 - Vol", ou "" sans phases.
+function M:PhaseLabel()
+    local def = self.def
+    if not def or not self.phase then return "" end
+    local phases = def.phases or EMPTY
+    if #phases == 0 then return "" end
+    local phaseDef = phases[self.phase]
+    local name = phaseDef and phaseDef.name
+    local label = ("Phase %d/%d"):format(self.phase, #phases)
+    if name and name ~= "" then label = label .. " - " .. name end
+    return label
+end
+
+function M:RefreshPhaseFrame()
+    local frame = self.phaseFrame
+    if not frame or not self.def then return end
+    local now = GetTime()
+    local def = self.def
+
+    local phaseLabel = self:PhaseLabel()
+    frame.title:SetText(phaseLabel ~= ""
+        and ("%s  |cffffd100%s|r"):format(def.name or "?", phaseLabel)
+        or (def.name or "?"))
+
+    local fight = FormatClock(now - self.pullTime)
+    if phaseLabel ~= "" then
+        frame.clock:SetText(("%s  |cffaaaaaa(phase %s)|r"):format(fight, FormatClock(now - self.phaseTime)))
+    else
+        frame.clock:SetText(fight)
+    end
+
+    local pct = self.lastHealthPct
+    frame.health:SetText(pct and ("%d%%"):format(pct * 100 + 0.5) or "")
+end
+
+function M:ShowPhaseFrame()
+    local config = self:GetConfig()
+    if config and config.phaseFrame == false then return end
+    local frame = self:GetPhaseFrame()
+    frame.sinceRefresh = PHASE_FRAME_REFRESH
+    self:RefreshPhaseFrame()
+    frame:Show()
+end
+
+function M:HidePhaseFrame()
+    local frame = self.phaseFrame
+    if not frame then return end
+    if frame.mbsForcedShow or frame.mbsUnlocked then return end
+    frame:Hide()
+end
+
+-- Apercu pour /mbs test : un faux combat fige, le temps de placer le cadre.
+function M:TestPhaseFrame()
+    if self.engaged then return end
+    local frame = self:GetPhaseFrame()
+    frame.title:SetText("Onyxia  |cffffd100Phase 2/3 - Vol|r")
+    frame.clock:SetText("1:23  |cffaaaaaa(phase 0:12)|r")
+    frame.health:SetText("58%")
+    frame.testing = true
+    frame:Show()
+end
+
+--------------------------------------------------------------------------------
+-- Annonces
+--------------------------------------------------------------------------------
+
+function M:Announce(text, opts)
+    local config = self:GetConfig()
+    if config and config.announce == false then return false end
+    opts = opts or {}
+    opts.text = text
+    return Alerts:Show(ALERT_KEY, opts)
+end
+
+--------------------------------------------------------------------------------
 -- Affichage d'un timer
 --------------------------------------------------------------------------------
 
-local function TimerLabel(def)
-    return def.name or (def.spellId and ns.GetSpellName(def.spellId)) or "?"
-end
-
-local function TimerIcon(def)
-    if def.icon then return def.icon end
-    if def.spellId then return ns.GetSpellTexture(def.spellId) end
-    return nil
-end
-
---- Affiche la bar qui compte a rebours jusqu'a la prochaine occurrence.
 function M:ShowBar(def, duration)
     if def.bar == false or duration <= 0 then return end
     local anchorKey = ns:ResolveAnchorKey(def.spellId)
@@ -116,16 +327,44 @@ function M:StopBar(def)
     if group then group:StopBar(def.key) end
 end
 
+local function TimerPrefix(def)
+    return "BossTimer_" .. def.key .. "_"
+end
+
+--- Annule tout ce qui est programme pour ce timer : echeance, pre-alerte,
+-- compte a rebours.
+function M:CancelTimerSchedule(def)
+    Scheduler:CancelPrefix(TimerPrefix(def))
+end
+
+function M:CancelTimerDef(def)
+    self:CancelTimerSchedule(def)
+    self:StopBar(def)
+end
+
 --- Le moment ou la capacite tombe : on annonce, puis on reprogramme si le timer
 -- se repete.
-function M:FireTimer(def)
+function M:FireTimer(def, subtitle)
     if def.once and def.fired then return end
     def.fired = true
 
     EventBus:Fire("BOSS_TIMER_FIRED", def)
 
     local config = self:GetConfig()
-    if config and config.sound and _G.PlaySound and _G.SOUNDKIT then
+    local announce = def.announce
+    -- Une aura qui vise le joueur s'annonce d'elle-meme : c'est l'information
+    -- qui compte le plus dans un combat, et la data n'a pas a la repeter.
+    if announce == nil and def.trigger == "AURA" and def.on == "player" then
+        announce = TimerLabel(def) .. " SUR TOI"
+    end
+    if announce then
+        self:Announce(type(announce) == "string" and announce or TimerLabel(def), {
+            subtitle = subtitle,
+            icon     = TimerIcon(def),
+            color    = def.color,
+            quiet    = not def.flash,
+        })
+    elseif config and config.sound and _G.PlaySound and _G.SOUNDKIT then
         PlaySound(SOUNDKIT.RAID_WARNING, "Master")
     end
 
@@ -136,94 +375,536 @@ function M:FireTimer(def)
     end
 end
 
+--- Programme l'echeance, la pre-alerte et le compte a rebours d'un timer.
 function M:ScheduleNext(def, delay)
+    self:CancelTimerSchedule(def)
     self:ShowBar(def, delay)
-    Scheduler:Schedule("BossTimer_" .. def.key, delay, function()
+
+    local prefix = TimerPrefix(def)
+    Scheduler:Schedule(prefix .. "fire", delay, function()
         self:FireTimer(def)
     end)
+
+    local config = self:GetConfig() or EMPTY
+
+    if def.announce and def.warnBefore and delay > def.warnBefore and config.announce ~= false then
+        Scheduler:Schedule(prefix .. "warn", delay - def.warnBefore, function()
+            self:Announce(TimerLabel(def), {
+                subtitle = ("dans %ds"):format(def.warnBefore),
+                icon     = TimerIcon(def),
+                color    = def.color,
+                quiet    = true,
+            })
+        end)
+    end
+
+    local countdown = tonumber(def.countdown)
+    if countdown and countdown > 0 and config.countdown ~= false then
+        countdown = math.min(math.floor(countdown), 10)
+        local label = TimerLabel(def)
+        for i = countdown, 1, -1 do
+            if delay > i then
+                Scheduler:Schedule(prefix .. "cd" .. i, delay - i, function()
+                    self:Announce(tostring(i), {
+                        subtitle = label,
+                        silent   = true,
+                        quiet    = true,
+                        duration = 0.95,
+                    })
+                end)
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Phases et applicabilite
+--------------------------------------------------------------------------------
+
+--- Une entree (timer ou phase) s'applique-t-elle a la difficulte courante ?
+-- `difficulties` absent = toutes.
+local function AppliesToDifficulty(entry, difficultyId)
+    local list = entry.difficulties
+    if not list or not difficultyId or difficultyId == 0 then return true end
+    for i = 1, #list do
+        if list[i] == difficultyId then return true end
+    end
+    return false
+end
+
+--- Un timer restreint a `phase` ou `phases` ne vit que dans celles-la.
+local function TimerInPhase(def, phase)
+    if def.phase then return def.phase == phase end
+    local list = def.phases
+    if not list then return true end
+    for i = 1, #list do
+        if list[i] == phase then return true end
+    end
+    return false
+end
+M.TimerInPhase = TimerInPhase
+
+local function AddTo(lookup, key, entry)
+    if key == nil then return end
+    local list = lookup[key]
+    if not list then
+        list = {}
+        lookup[key] = list
+    end
+    list[#list + 1] = entry
+end
+
+--- Construit les tables de recherche une fois a l'engage : le combat log ne
+-- doit jamais parcourir `timers`.
+function M:BuildLookups(def, difficultyId)
+    local castTriggers, auraTriggers, deathTriggers = {}, {}, {}
+    local emoteTriggers, healthTriggers = {}, {}
+
+    local timers = def.timers or EMPTY
+    for i = 1, #timers do
+        local timer = timers[i]
+        timer.key     = timer.key or ("t" .. i)
+        timer.fired   = false
+        timer.isPhase = nil
+        timer.skipped = not AppliesToDifficulty(timer, difficultyId)
+        if not timer.skipped then
+            -- Un spellId sur n'importe quel type de trigger sert de resynchro :
+            -- la valeur observee prime toujours sur la valeur estimee.
+            if timer.trigger == "AURA" then
+                AddTo(auraTriggers, timer.spellId, timer)
+            elseif timer.spellId then
+                AddTo(castTriggers, timer.spellId, timer)
+            end
+            if timer.trigger == "HEALTH" then
+                healthTriggers[#healthTriggers + 1] = timer
+            elseif timer.trigger == "DEATH" then
+                AddTo(deathTriggers, timer.npcId, timer)
+            elseif timer.trigger == "EMOTE" then
+                emoteTriggers[#emoteTriggers + 1] = timer
+            end
+        end
+    end
+
+    local phases = def.phases or EMPTY
+    for i = 1, #phases do
+        local phase = phases[i]
+        phase.index   = i
+        phase.isPhase = true
+        phase.fired   = false
+        phase.skipped = not AppliesToDifficulty(phase, difficultyId)
+        if not phase.skipped then
+            local trigger = phase.trigger
+            if trigger == "HEALTH" then
+                healthTriggers[#healthTriggers + 1] = phase
+            elseif trigger == "CAST" then
+                AddTo(castTriggers, phase.spellId, phase)
+            elseif trigger == "AURA" then
+                AddTo(auraTriggers, phase.spellId, phase)
+            elseif trigger == "DEATH" then
+                AddTo(deathTriggers, phase.npcId, phase)
+            elseif trigger == "EMOTE" then
+                emoteTriggers[#emoteTriggers + 1] = phase
+            end
+        end
+    end
+
+    self.castTriggers   = castTriggers
+    self.auraTriggers   = auraTriggers
+    self.deathTriggers  = deathTriggers
+    self.emoteTriggers  = emoteTriggers
+    self.healthTriggers = healthTriggers
+end
+
+--- Barre vers la phase suivante, quand son echeance est connue (delai depuis
+-- le pull ou depuis l'entree dans la phase courante).
+function M:ShowPhaseBar(current)
+    local def = self.def
+    local nextDef = def.phases and def.phases[current + 1]
+    local group = self:GetGroup(GENERIC_ANCHOR)
+    group:StopBar("phase")
+    Scheduler:Cancel("BossTimer_phase_fire")
+    if not nextDef or nextDef.skipped or not nextDef.time then return end
+
+    local remaining
+    if nextDef.trigger == "PHASE" then
+        remaining = nextDef.time
+    elseif nextDef.trigger == "PULL" then
+        remaining = self.pullTime + nextDef.time - GetTime()
+    else
+        return
+    end
+    if remaining <= 0 then return end
+
+    local index = current + 1
+    if nextDef.bar ~= false then
+        group:StartBar("phase", remaining,
+            nextDef.name and ("Phase " .. index .. " - " .. nextDef.name) or ("Phase " .. index),
+            nextDef.spellId and ns.GetSpellTexture(nextDef.spellId) or nil,
+            { color = PHASE_COLOR, warnBefore = nextDef.warnBefore })
+    end
+    Scheduler:Schedule("BossTimer_phase_fire", remaining, function()
+        self:SetPhase(index, "time")
+    end)
+end
+
+--- Entre dans la phase `index`. Coupe les timers qui n'y ont pas leur place,
+-- lance ceux relatifs a l'entree dans la phase, annonce, et arme la suivante.
+function M:SetPhase(index, reason)
+    local def = self.def
+    if not def then return false end
+    index = tonumber(index)
+    if not index or index < 1 then return false end
+    local phases = def.phases or EMPTY
+    if index > math.max(1, #phases) then return false end
+    if self.phase == index then return false end
+
+    local previous = self.phase
+    local phaseDef = phases[index]
+    self.phase     = index
+    self.phaseTime = GetTime()
+    if phaseDef then phaseDef.fired = true end
+
+    local timers = def.timers or EMPTY
+    for i = 1, #timers do
+        local timer = timers[i]
+        if not timer.skipped then
+            if not TimerInPhase(timer, index) then
+                self:CancelTimerDef(timer)
+            elseif timer.trigger == "PHASE" and timer.phase == index and timer.time then
+                self:ScheduleNext(timer, timer.time)
+            end
+        end
+    end
+
+    self:ShowPhaseBar(index)
+
+    local config = self:GetConfig() or EMPTY
+    if previous and phaseDef and config.phaseAlert ~= false then
+        Alerts:Show(ALERT_KEY, {
+            text     = phaseDef.alert or ("Phase " .. index),
+            subtitle = phaseDef.name,
+            color    = phaseDef.color or PHASE_COLOR,
+            icon     = phaseDef.spellId and ns.GetSpellTexture(phaseDef.spellId) or nil,
+        })
+    end
+
+    if self.phaseFrame and self.phaseFrame:IsShown() then self:RefreshPhaseFrame() end
+    ns.Debug("phase", index, phaseDef and phaseDef.name or "", reason)
+    EventBus:Fire("BOSS_PHASE_CHANGED", index, phaseDef, previous, reason)
+    return true
+end
+
+--- Dispatch d'une entree declenchee (timer ou phase) par le combat log, un
+-- emote, une mort ou un seuil de vie.
+function M:Trigger(entry, reason, subtitle)
+    if entry.isPhase then
+        return self:SetPhase(entry.index, reason)
+    end
+    if not TimerInPhase(entry, self.phase or 1) then return false end
+    if entry.trigger == "CAST" or entry.trigger == "AURA"
+        or entry.trigger == "DEATH" or entry.trigger == "EMOTE" or entry.trigger == "HEALTH" then
+        self:FireTimer(entry, subtitle)
+        return true
+    end
+    if entry.repeatInterval then
+        -- Timer PULL/PHASE avec spellId : resynchro sur l'observation.
+        entry.fired = true
+        self:ScheduleNext(entry, entry.repeatInterval)
+        return true
+    end
+    return false
 end
 
 --------------------------------------------------------------------------------
 -- Engage / disengage
 --------------------------------------------------------------------------------
 
-local function BuildLookups(def)
-    local castTriggers, healthTriggers = {}, {}
-    for i = 1, #def.timers do
-        local timer = def.timers[i]
-        timer.key   = timer.key or ("t" .. i)
-        timer.fired = false
-        -- Un spellId sur n'importe quel type de trigger sert de resynchro :
-        -- la valeur observee prime toujours sur la valeur estimee.
-        if timer.spellId then castTriggers[timer.spellId] = timer end
-        if timer.trigger == "HEALTH" then
-            healthTriggers[#healthTriggers + 1] = timer
-        end
+local function ReasonLabel(reason)
+    if reason == "kill" then return "|cff00ff00kill|r" end
+    if reason == "wipe" then return "|cffff5555wipe|r" end
+    if reason == "reset" then return "reset (boss inactif)" end
+    if reason == "zone" then return "changement de zone" end
+    return reason or "fin"
+end
+
+function M:RegisterEmoteEvents()
+    for i = 1, #EMOTE_EVENTS do
+        self:RegisterEvent(EMOTE_EVENTS[i], "OnEmote")
     end
-    return castTriggers, healthTriggers
+end
+
+function M:UnregisterEmoteEvents()
+    for i = 1, #EMOTE_EVENTS do
+        self:UnregisterEvent(EMOTE_EVENTS[i])
+    end
 end
 
 function M:Engage(npcId, guid)
-    if self.engaged then return end
-    local def = BossTimerData[npcId]
+    if self.testing then return end
+    local primary = BossTimerAlias[npcId] or npcId
+    local def = BossTimerData[primary]
     if not def then return end
 
-    self.engaged  = npcId
-    self.def      = def
-    self.bossGUID = guid
-    self.pullTime = GetTime()
-    self.castTriggers, self.healthTriggers = BuildLookups(def)
-
-    self:StartPullTimers(def)
-
-    if #self.healthTriggers > 0 then
-        self:Repeat("healthPoll", HEALTH_POLL_INTERVAL, function() self:PollHealth() end)
+    -- Une rencontre signalee par le client sans data, puis un boss connu qui
+    -- agit : on monte en gamme sans perdre l'heure du pull.
+    local keepPull
+    if self.engaged then
+        if not self.generic then return end
+        keepPull = self.pullTime
+        self:Disengage("upgrade")
     end
 
-    ns.Debug("engage", npcId, def.name, guid)
-    EventBus:Fire("BOSS_ENGAGED", npcId, guid)
+    local _, _, difficultyId, _, instanceId = ns.GetInstanceInfo()
+
+    self.engaged       = primary
+    self.generic       = nil
+    self.def           = def
+    self.kind          = VALID_KINDS[def.kind] and def.kind or ns.GetContentKind()
+    self.bossGUID      = guid
+    self.pullTime      = keepPull or GetTime()
+    self.phase         = nil
+    self.phaseTime     = self.pullTime
+    self.lastHealthPct = nil
+    self.lastActivity  = self.pullTime
+    self.instanceId    = instanceId
+    self.difficultyId  = difficultyId
+    self.bossUnit      = nil
+
+    self.npcSet, self.alive = {}, {}
+    self.npcSet[primary], self.alive[primary] = true, true
+    for i = 1, #(def.npcIds or EMPTY) do
+        self.npcSet[def.npcIds[i]], self.alive[def.npcIds[i]] = true, true
+    end
+
+    self:BuildLookups(def, difficultyId)
+    self:SetPhase(1, "engage")
+    self:StartPullTimers(def)
+
+    self:Repeat("healthPoll", HEALTH_POLL_INTERVAL, function() self:PollHealth() end)
+    if #self.emoteTriggers > 0 then self:RegisterEmoteEvents() end
+
+    local inactivity = def.inactivity or INACTIVITY[self.kind]
+    if inactivity then
+        self.inactivity = inactivity
+        self:Repeat("watchdog", WATCHDOG_INTERVAL, function() self:CheckInactivity() end)
+    end
+
+    self:ShowPhaseFrame()
+
+    ns.Debug("engage", primary, def.name, guid, self.kind)
+    EventBus:Fire("BOSS_ENGAGED", primary, guid, self.kind)
+end
+
+--- Rencontre signalee par le client mais sans data : on affiche au moins le
+-- chrono du combat, c'est deja ce qu'on attend d'un boss mod.
+function M:EngageGeneric(encounterId, name)
+    if self.engaged or self.testing then return end
+    local config = self:GetConfig()
+    if config and config.phaseFrame == false then return end
+
+    local _, _, difficultyId, _, instanceId = ns.GetInstanceInfo()
+    self.engaged       = "encounter:" .. tostring(encounterId)
+    self.generic       = true
+    self.def           = { name = name or ("Rencontre " .. tostring(encounterId)), generic = true, timers = EMPTY }
+    self.kind          = ns.GetContentKind()
+    self.bossGUID      = nil
+    self.pullTime      = GetTime()
+    self.phase         = 1
+    self.phaseTime     = self.pullTime
+    self.lastHealthPct = nil
+    self.lastActivity  = self.pullTime
+    self.instanceId    = instanceId
+    self.difficultyId  = difficultyId
+    self.npcSet, self.alive = {}, {}
+    self:BuildLookups(self.def, difficultyId)
+    self:Repeat("healthPoll", HEALTH_POLL_INTERVAL, function() self:PollHealth() end)
+    self:ShowPhaseFrame()
+    EventBus:Fire("BOSS_ENGAGED", self.engaged, nil, self.kind)
 end
 
 function M:StartPullTimers(def)
-    for i = 1, #def.timers do
-        local timer = def.timers[i]
-        if timer.trigger == "PULL" and timer.time then
+    local timers = def.timers or EMPTY
+    for i = 1, #timers do
+        local timer = timers[i]
+        if timer.trigger == "PULL" and timer.time and not timer.skipped and TimerInPhase(timer, 1) then
             self:ScheduleNext(timer, timer.time)
         end
     end
 end
 
-function M:Disengage()
+function M:Disengage(reason)
     if not self.engaged then return end
-    local npcId = self.engaged
+    reason = reason or "end"
+    local npcId   = self.engaged
+    local def     = self.def
+    local elapsed = GetTime() - self.pullTime
+    local phase   = self.phase
+    local pct     = self.lastHealthPct
+
     self.engaged        = nil
+    self.generic        = nil
     self.def            = nil
+    self.kind           = nil
     self.bossGUID       = nil
+    self.bossUnit       = nil
+    self.phase          = nil
+    self.npcSet         = nil
+    self.alive          = nil
     self.castTriggers   = nil
+    self.auraTriggers   = nil
+    self.deathTriggers  = nil
+    self.emoteTriggers  = nil
     self.healthTriggers = nil
+    self.inactivity     = nil
+    self.wipeSince      = nil
+
     Scheduler:CancelPrefix("BossTimer_")
     self:CancelAllTimers()
+    self:UnregisterEmoteEvents()
     self:ClearBars()
-    EventBus:Fire("BOSS_DISENGAGED", npcId)
+    self:HidePhaseFrame()
+    Alerts:Hide(ALERT_KEY)
+
+    local config = self:GetConfig()
+    if config and config.summary ~= false and def and not def.generic
+        and (reason == "kill" or reason == "wipe" or reason == "reset") then
+        local details = ""
+        if phase and def.phases and #def.phases > 0 then
+            details = (" - phase %d/%d"):format(phase, #def.phases)
+        end
+        if reason ~= "kill" and pct then
+            details = details .. (" - boss a %d%%"):format(pct * 100 + 0.5)
+        end
+        ns.Print(("%s : %s apres %s%s"):format(def.name or tostring(npcId),
+            ReasonLabel(reason), FormatClock(elapsed), details))
+    end
+
+    ns.Debug("disengage", npcId, reason)
+    EventBus:Fire("BOSS_DISENGAGED", npcId, reason, elapsed)
+end
+
+--------------------------------------------------------------------------------
+-- Fin de combat : kill, wipe, reset, zone
+--------------------------------------------------------------------------------
+
+function M:OnBossUnitDied(npcId)
+    if not self.alive then return end
+    self.alive[npcId] = nil
+    if next(self.alive) == nil then
+        self:Disengage("kill")
+    else
+        ns.Debug("boss mort", npcId, "- il en reste")
+    end
+end
+
+--- Le client dit que la rencontre continue, ou quelqu'un du groupe se bat
+-- encore : ce n'est pas un wipe.
+function M:IsFightOngoing()
+    if ns.IsEncounterInProgress and self.kind ~= "world" then
+        if ns.IsEncounterInProgress() then return true end
+    end
+    return ns.IsGroupInCombat()
+end
+
+function M:StartWipeCheck()
+    if not self.engaged then return end
+    self.wipeSince = GetTime()
+    self:Repeat("wipeCheck", WIPE_POLL_INTERVAL, function() self:CheckWipe() end)
+end
+
+function M:StopWipeCheck()
+    self.wipeSince = nil
+    self:CancelTimer("wipeCheck")
+end
+
+--- Tourne tant que le joueur est hors combat : un joueur mort dont le groupe
+-- finit par wiper ne recevra plus aucun event, seul ce ticker peut le voir.
+function M:CheckWipe()
+    if not self.engaged then return self:StopWipeCheck() end
+    if self:IsFightOngoing() then
+        self.wipeSince = GetTime()
+        return
+    end
+    local grace = self.def.wipeGrace or WIPE_GRACE[self.kind] or WIPE_GRACE.raid
+    if GetTime() - (self.wipeSince or 0) >= grace then
+        self:Disengage("wipe")
+    end
+end
+
+function M:CheckInactivity()
+    if not self.engaged or not self.inactivity then return end
+    if GetTime() - self.lastActivity >= self.inactivity then
+        self:Disengage("reset")
+    end
 end
 
 --------------------------------------------------------------------------------
 -- Events
 --------------------------------------------------------------------------------
 
-function M:ENCOUNTER_START(_, encounterId)
+function M:ENCOUNTER_START(_, encounterId, encounterName)
     local npcId = BossTimerEncounter[tonumber(encounterId) or -1]
-    if npcId then self:Engage(npcId, nil) end
+    if npcId then
+        self:Engage(npcId, nil)
+    else
+        self:EngageGeneric(encounterId, encounterName)
+    end
 end
 
-function M:ENCOUNTER_END()
-    self:Disengage()
+function M:ENCOUNTER_END(_, _, _, _, _, success)
+    if not self.engaged then return end
+    self:Disengage((tonumber(success) or 0) == 1 and "kill" or "wipe")
+end
+
+--- Les unites boss1..5 apparaissent : si l'une d'elles est connue, c'est un
+-- engage (Cata+ et retail, ou ENCOUNTER_START peut ne pas etre mappe).
+function M:INSTANCE_ENCOUNTER_ENGAGE_UNIT()
+    if self.engaged and not self.generic then return end
+    for i = 1, 5 do
+        local unit = "boss" .. i
+        if UnitExists(unit) then
+            local guid = UnitGUID(unit)
+            local npcId = ns.NpcIdFromGUID(guid)
+            if npcId and BossTimerAlias[npcId] then
+                self:Engage(npcId, guid)
+                return
+            end
+        end
+    end
 end
 
 function M:PLAYER_REGEN_ENABLED()
-    -- Fin de combat = wipe ou kill : dans les deux cas les timers du pull
-    -- precedent doivent mourir avant le suivant.
-    self:Disengage()
+    -- Sortir de combat n'est pas la fin du combat : on verifie le groupe
+    -- pendant un delai de grace avant de conclure au wipe.
+    if self.engaged then self:StartWipeCheck() end
+end
+
+function M:PLAYER_REGEN_DISABLED()
+    if self.engaged then self:StopWipeCheck() end
+end
+
+function M:PLAYER_ENTERING_WORLD()
+    if self.engaged then self:Disengage("zone") end
+end
+
+function M:ZONE_CHANGED_NEW_AREA()
+    if not self.engaged then return end
+    local _, _, _, _, instanceId = ns.GetInstanceInfo()
+    if instanceId ~= self.instanceId then self:Disengage("zone") end
+end
+
+--- Emote / cri de boss : les textes sont localises, la data porte donc un
+-- fragment a chercher tel quel (`pattern`), jamais une phrase complete.
+function M:OnEmote(_, text)
+    local list = self.emoteTriggers
+    if not list or not text or #list == 0 then return end
+    for i = 1, #list do
+        local entry = list[i]
+        local pattern = entry.pattern or entry.emote
+        if pattern and text:find(pattern, 1, not entry.lua) then
+            self:Trigger(entry, "emote")
+        end
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -252,33 +933,72 @@ local function CachedNpcId(guid)
     return npcId or nil
 end
 
-local function OnCombatLog()
-    local _, sub, _, srcGUID, _, _, _, dstGUID, _, _, _, spellId = CombatLogGetCurrentEventInfo()
+--- Cette unite fait-elle partie de la rencontre engagee ?
+local function IsBossGUID(guid)
+    if not guid then return false end
+    if guid == M.bossGUID then return true end
+    local npcId = CachedNpcId(guid)
+    return npcId ~= nil and M.npcSet[npcId] == true
+end
 
-    if M.engaged then
+local playerGUID
+
+local function OnCombatLog()
+    local _, sub, _, srcGUID, _, _, _, dstGUID, dstName, _, _, spellId = CombatLogGetCurrentEventInfo()
+
+    if M.engaged and not M.generic then
+        -- World boss : tout ce qu'il fait ou subit prouve qu'il est encore la.
+        if M.inactivity and (IsBossGUID(srcGUID) or IsBossGUID(dstGUID)) then
+            M.lastActivity = GetTime()
+        end
+
         if sub == "UNIT_DIED" then
-            if dstGUID == M.bossGUID or CachedNpcId(dstGUID) == M.engaged then
-                M:Disengage()
+            local npcId = CachedNpcId(dstGUID)
+            if npcId then
+                if M.npcSet[npcId] or dstGUID == M.bossGUID then
+                    M:OnBossUnitDied(npcId)
+                else
+                    local list = M.deathTriggers[npcId]
+                    if list then
+                        for i = 1, #list do M:Trigger(list[i], "death") end
+                    end
+                end
             end
             return
         end
 
-        if sub ~= "SPELL_CAST_START" and sub ~= "SPELL_CAST_SUCCESS" then return end
-        if srcGUID ~= M.bossGUID and CachedNpcId(srcGUID) ~= M.engaged then return end
-        if not M.bossGUID then M.bossGUID = srcGUID end
+        if sub == "SPELL_CAST_START" or sub == "SPELL_CAST_SUCCESS" then
+            if not IsBossGUID(srcGUID) then return end
+            if not M.bossGUID then M.bossGUID = srcGUID end
+            local list = M.castTriggers[spellId]
+            if list then M:OnBossCast(list, sub) end
+            return
+        end
 
-        local def = M.castTriggers[spellId]
-        if def then M:OnBossCast(def, sub) end
+        if sub == "SPELL_AURA_APPLIED" or sub == "SPELL_AURA_REMOVED" then
+            local list = M.auraTriggers[spellId]
+            if list then M:OnAura(list, sub, dstGUID, dstName) end
+        end
         return
     end
 
-    -- Pas encore engage : filet de secours la ou ENCOUNTER_START n'existe pas.
-    if sub ~= "SPELL_CAST_START" and sub ~= "SPELL_CAST_SUCCESS"
-        and sub ~= "SPELL_DAMAGE" and sub ~= "SWING_DAMAGE" then return end
+    if M.testing then return end
 
-    local npcId = CachedNpcId(srcGUID)
-    if npcId and BossTimerData[npcId] then
-        M:Engage(npcId, srcGUID)
+    -- Pas encore engage (ou engage sans data) : filet de secours la ou
+    -- ENCOUNTER_START n'existe pas, ou n'est pas mappe. Un boss connu qui agit,
+    -- ou qui encaisse (world boss deja engage par d'autres).
+    if sub == "SPELL_CAST_START" or sub == "SPELL_CAST_SUCCESS" then
+        local npcId = CachedNpcId(srcGUID)
+        if npcId and BossTimerAlias[npcId] then M:Engage(npcId, srcGUID) end
+    elseif sub == "SPELL_DAMAGE" or sub == "SWING_DAMAGE" or sub == "RANGE_DAMAGE"
+        or sub == "SPELL_PERIODIC_DAMAGE" then
+        local npcId = CachedNpcId(srcGUID)
+        if npcId and BossTimerAlias[npcId] then
+            M:Engage(npcId, srcGUID)
+            return
+        end
+        npcId = CachedNpcId(dstGUID)
+        if npcId and BossTimerAlias[npcId] then M:Engage(npcId, dstGUID) end
     end
 end
 
@@ -286,20 +1006,39 @@ end
 -- occurrence dessus.
 -- Un sort avec temps d'incantation genere START *et* SUCCESS : on n'en retient
 -- qu'un seul, sinon le timer se declenche deux fois.
-function M:OnBossCast(def, subevent)
-    local wantStart = (def.castStart == true)
-    if wantStart then
-        if subevent ~= "SPELL_CAST_START" then return end
-    elseif subevent ~= "SPELL_CAST_SUCCESS" then
-        return
+function M:OnBossCast(list, subevent)
+    for i = 1, #list do
+        local entry = list[i]
+        local wantStart = (entry.castStart == true)
+        if (wantStart and subevent == "SPELL_CAST_START")
+            or (not wantStart and subevent == "SPELL_CAST_SUCCESS") then
+            self:Trigger(entry, "cast")
+        end
     end
+end
 
-    if def.trigger == "CAST" then
-        self:FireTimer(def)
-    elseif def.repeatInterval then
-        Scheduler:Cancel("BossTimer_" .. def.key)
-        def.fired = true
-        self:ScheduleNext(def, def.repeatInterval)
+--- Aura posee / retiree. `on` = "boss" (defaut), "player" ou "any".
+-- `event` = "APPLIED" (defaut) ou "REMOVED".
+function M:OnAura(list, subevent, dstGUID, dstName)
+    playerGUID = playerGUID or UnitGUID("player")
+    local applied = (subevent == "SPELL_AURA_APPLIED")
+    for i = 1, #list do
+        local entry = list[i]
+        local wantRemoved = (entry.event == "REMOVED")
+        if applied ~= wantRemoved then
+            local on = entry.on or "boss"
+            local matches
+            if on == "player" then
+                matches = (dstGUID == playerGUID)
+            elseif on == "any" then
+                matches = true
+            else
+                matches = IsBossGUID(dstGUID)
+            end
+            if matches then
+                self:Trigger(entry, "aura", (on == "any") and dstName or nil)
+            end
+        end
     end
 end
 
@@ -307,44 +1046,92 @@ end
 -- Seuils de vie
 --------------------------------------------------------------------------------
 -- UNIT_HEALTH_FREQUENT a disparu en retail et UNIT_HEALTH n'est fiable que si le
--- boss occupe une frame surveillee. On resout l'unite explicitement, et on
--- assume : les seuils HEALTH sont structurellement moins fiables en classic, ou
--- il n'existe pas d'unite boss dediee.
+-- boss occupe une frame surveillee. On resout l'unite explicitement : boss1..5
+-- quand elles existent, sinon cible, focus, mouseover, nameplates, puis les
+-- cibles du groupe. En classic il n'y a pas d'unite boss dediee : les seuils
+-- HEALTH y restent structurellement moins fiables, et c'est assume.
 
-local BOSS_UNITS = { "boss1", "boss2", "boss3", "boss4", "boss5" }
-local FALLBACK_UNITS = { "target", "focus", "mouseover" }
+local BOSS_UNITS     = { "boss1", "boss2", "boss3", "boss4", "boss5" }
+local FALLBACK_UNITS = { "target", "focus", "mouseover", "targettarget" }
+
+function M:UnitIsBoss(unit)
+    local guid = UnitGUID(unit)
+    if not guid then return false end
+    if guid == self.bossGUID then return true end
+    local npcId = CachedNpcId(guid)
+    return npcId ~= nil and self.npcSet[npcId] == true
+end
 
 function M:ResolveBossUnit()
+    -- Chemin rapide : l'unite trouvee au tour precedent est encore la bonne.
+    local cached = self.bossUnit
+    if cached and UnitExists(cached) and self:UnitIsBoss(cached) then return cached end
+    self.bossUnit = nil
+
     if ns.has.bossUnitFrames then
         for i = 1, #BOSS_UNITS do
             local unit = BOSS_UNITS[i]
-            if UnitExists(unit) then
-                if not self.bossGUID or UnitGUID(unit) == self.bossGUID then return unit end
+            if UnitExists(unit) and self:UnitIsBoss(unit) then
+                self.bossUnit = unit
+                return unit
             end
         end
     end
     for i = 1, #FALLBACK_UNITS do
         local unit = FALLBACK_UNITS[i]
-        if UnitExists(unit) then
-            local guid = UnitGUID(unit)
-            if guid == self.bossGUID or CachedNpcId(guid) == self.engaged then return unit end
+        if UnitExists(unit) and self:UnitIsBoss(unit) then
+            self.bossUnit = unit
+            return unit
+        end
+    end
+    if ns.has.namePlateUnits then
+        for i = 1, 40 do
+            local unit = "nameplate" .. i
+            if not UnitExists(unit) then break end
+            if self:UnitIsBoss(unit) then
+                self.bossUnit = unit
+                return unit
+            end
+        end
+    end
+    local prefix, count = ns.GroupUnitPrefix()
+    for i = 1, count do
+        local unit = prefix .. i .. "target"
+        if UnitExists(unit) and self:UnitIsBoss(unit) then
+            self.bossUnit = unit
+            return unit
         end
     end
     return nil
 end
 
 function M:PollHealth()
+    if not self.def or self.def.generic then
+        -- Sans data, on ne sait pas quelle unite est le boss : boss1 fait foi.
+        if ns.has.bossUnitFrames and UnitExists("boss1") then
+            local max = UnitHealthMax("boss1")
+            if max and max > 0 then self.lastHealthPct = UnitHealth("boss1") / max end
+        end
+        return
+    end
+
     local unit = self:ResolveBossUnit()
     if not unit then return end
     local max = UnitHealthMax(unit)
     if not max or max <= 0 then return end
     local pct = UnitHealth(unit) / max
+    self.lastHealthPct = pct
 
     local triggers = self.healthTriggers
     for i = 1, #triggers do
-        local def = triggers[i]
-        if not def.fired and def.threshold and pct <= def.threshold then
-            self:FireTimer(def)
+        local entry = triggers[i]
+        if not entry.fired and entry.threshold and pct <= entry.threshold then
+            if entry.isPhase then
+                entry.fired = true
+                self:SetPhase(entry.index, "health")
+            else
+                self:Trigger(entry, "health")
+            end
         end
     end
 end
@@ -352,15 +1139,15 @@ end
 --------------------------------------------------------------------------------
 -- Mode test
 --------------------------------------------------------------------------------
--- Rejoue la timeline hors combat. Vaut aussi comme test de non-regression apres
--- edition d'un fichier de data.
+-- Rejoue la timeline hors combat, phases comprises. Vaut aussi comme test de
+-- non-regression apres edition d'un fichier de data.
 
 function M:TestBoss(npcId)
     if not npcId then
         ns.Print("usage : /mbs test boss <npcId>")
         return
     end
-    local def = BossTimerData[npcId]
+    local def = BossTimerData[BossTimerAlias[npcId] or npcId]
     if not def then
         ns.Print(("aucune data pour le npcId %d (flavor %s)."):format(npcId, ns.flavor))
         return
@@ -371,42 +1158,112 @@ function M:TestBoss(npcId)
     end
 
     ns.testMode = true
-    self.testing = true
-    self.def = def
-    self.castTriggers, self.healthTriggers = BuildLookups(def)
-    self.pullTime = GetTime()
+    self.testing   = true
+    self.def       = def
+    self.kind      = VALID_KINDS[def.kind] and def.kind or "raid"
+    self.pullTime  = GetTime()
+    self.phaseTime = self.pullTime
+    self.phase     = nil
+    self.lastHealthPct = 1
+    self.npcSet, self.alive = {}, {}
+    self:BuildLookups(def, nil)
+    self:SetPhase(1, "test")
 
     local stagger = 6
-    for i = 1, #def.timers do
-        local timer = def.timers[i]
+    local timers = def.timers or EMPTY
+    for i = 1, #timers do
+        local timer = timers[i]
         if timer.trigger == "PULL" and timer.time then
             self:ScheduleNext(timer, timer.time)
+        elseif timer.trigger == "PHASE" and timer.time then
+            -- Programme a l'entree dans sa phase par SetPhase : rien a faire.
         else
-            -- CAST et HEALTH n'ont pas d'echeance connue hors combat : on les
-            -- etale pour pouvoir juger du rendu et des positions.
+            -- CAST, HEALTH, AURA... n'ont pas d'echeance connue hors combat :
+            -- on les etale pour pouvoir juger du rendu et des positions.
             local delay = timer.testTime or stagger
             stagger = stagger + 6
             self:ScheduleNext(timer, delay)
         end
     end
 
-    ns.Print(("test : %s (%d) — %d timer(s). /mbs test stop pour arreter.")
-        :format(def.name or "?", npcId, #def.timers))
+    -- Les phases sans echeance sont rejouees a tour de role, pour voir le cadre,
+    -- l'annonce et la bascule des timers.
+    local phases = def.phases or EMPTY
+    local phaseStagger = 15
+    for i = 2, #phases do
+        local phase = phases[i]
+        if phase.trigger ~= "PULL" and phase.trigger ~= "PHASE" then
+            local delay = phase.testTime or phaseStagger
+            phaseStagger = phaseStagger + 15
+            Scheduler:Schedule("BossTimer_phase_test" .. i, delay, function()
+                self.lastHealthPct = phase.threshold or self.lastHealthPct
+                self:SetPhase(i, "test")
+            end)
+        end
+    end
+
+    self:ShowPhaseFrame()
+
+    ns.Print(("test : %s (%d) — %d timer(s), %d phase(s). /mbs test stop pour arreter.")
+        :format(def.name or "?", npcId, #timers, #phases))
 end
 
 function M:StopTestBoss()
+    if self.phaseFrame and self.phaseFrame.testing then
+        self.phaseFrame.testing = nil
+        if not self.engaged then self:HidePhaseFrame() end
+    end
     if not self.testing then return end
     self.testing = false
     Scheduler:CancelPrefix("BossTimer_")
     self:ClearBars()
-    self.def, self.castTriggers, self.healthTriggers = nil, nil, nil
+    self:HidePhaseFrame()
+    Alerts:Hide(ALERT_KEY)
+    self.def, self.phase, self.kind = nil, nil, nil
+    self.castTriggers, self.healthTriggers = nil, nil
+    self.auraTriggers, self.deathTriggers, self.emoteTriggers = nil, nil, nil
 end
 
 --------------------------------------------------------------------------------
 -- Validation de la data
 --------------------------------------------------------------------------------
 
-local VALID_TRIGGERS = { PULL = true, CAST = true, HEALTH = true }
+local VALID_TRIGGERS = {
+    PULL = true, PHASE = true, CAST = true, HEALTH = true,
+    AURA = true, EMOTE = true, DEATH = true,
+}
+
+local function ValidateEntry(entry, what, fail, phaseCount)
+    local trigger = entry.trigger
+    if not VALID_TRIGGERS[trigger] then
+        fail(("%s : trigger inconnu %s"):format(what, tostring(trigger)))
+    elseif trigger == "PULL" and not entry.time then
+        fail(("%s : trigger PULL sans `time`"):format(what))
+    elseif trigger == "PHASE" and not entry.time then
+        fail(("%s : trigger PHASE sans `time`"):format(what))
+    elseif trigger == "CAST" and not entry.spellId then
+        fail(("%s : trigger CAST sans `spellId`"):format(what))
+    elseif trigger == "AURA" and not entry.spellId then
+        fail(("%s : trigger AURA sans `spellId`"):format(what))
+    elseif trigger == "HEALTH" and not entry.threshold then
+        fail(("%s : trigger HEALTH sans `threshold`"):format(what))
+    elseif trigger == "EMOTE" and not (entry.pattern or entry.emote) then
+        fail(("%s : trigger EMOTE sans `pattern`"):format(what))
+    elseif trigger == "DEATH" and not entry.npcId then
+        fail(("%s : trigger DEATH sans `npcId`"):format(what))
+    end
+    if entry.phase and (type(entry.phase) ~= "number" or entry.phase > phaseCount) then
+        fail(("%s : `phase` %s hors des phases declarees"):format(what, tostring(entry.phase)))
+    end
+    if entry.phases then
+        for i = 1, #entry.phases do
+            if type(entry.phases[i]) ~= "number" or entry.phases[i] > phaseCount then
+                fail(("%s : `phases` reference une phase inexistante"):format(what))
+                break
+            end
+        end
+    end
+end
 
 function M:ValidateData()
     local problems = 0
@@ -422,19 +1279,31 @@ function M:ValidateData()
             fail(("entree chargee sur le client %s alors que `flavors` ne le liste pas")
                 :format(ns.flavor))
         end
+        if def.kind and not VALID_KINDS[def.kind] then
+            fail(("`kind` inconnu %s (raid, dungeon ou world)"):format(tostring(def.kind)))
+        end
+        local phases = def.phases or EMPTY
+        local phaseCount = math.max(1, #phases)
+        for i = 1, #phases do
+            local phase = phases[i]
+            if i == 1 then
+                if phase.trigger and phase.trigger ~= "PULL" then
+                    fail("phase 1 : c'est la phase d'engage, elle ne porte pas de trigger")
+                end
+            elseif not phase.trigger then
+                fail(("phase %d : trigger manquant"):format(i))
+            else
+                ValidateEntry(phase, ("phase %d"):format(i), fail, phaseCount)
+            end
+        end
         if type(def.timers) ~= "table" then
             fail("champ `timers` manquant")
         else
             for i = 1, #def.timers do
                 local timer = def.timers[i]
-                if not VALID_TRIGGERS[timer.trigger] then
-                    fail(("timer %d : trigger inconnu %s"):format(i, tostring(timer.trigger)))
-                elseif timer.trigger == "PULL" and not timer.time then
-                    fail(("timer %d : trigger PULL sans `time`"):format(i))
-                elseif timer.trigger == "CAST" and not timer.spellId then
-                    fail(("timer %d : trigger CAST sans `spellId`"):format(i))
-                elseif timer.trigger == "HEALTH" and not timer.threshold then
-                    fail(("timer %d : trigger HEALTH sans `threshold`"):format(i))
+                ValidateEntry(timer, ("timer %d"):format(i), fail, phaseCount)
+                if timer.trigger == "PHASE" and not timer.phase then
+                    fail(("timer %d : trigger PHASE sans `phase`"):format(i))
                 end
             end
         end
@@ -448,6 +1317,77 @@ function M:CountData()
     return n
 end
 
+--- Entrees triees par nature puis par zone, pour /mbs boss list.
+function M:ListData(kind)
+    local out = {}
+    for npcId, def in pairs(BossTimerData) do
+        local defKind = VALID_KINDS[def.kind] and def.kind or "raid"
+        if not kind or kind == defKind then
+            out[#out + 1] = { npcId = npcId, def = def, kind = defKind }
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.kind ~= b.kind then return a.kind < b.kind end
+        local za, zb = a.def.zone or "", b.def.zone or ""
+        if za ~= zb then return za < zb end
+        return (a.def.name or "") < (b.def.name or "")
+    end)
+    return out
+end
+
+function M:BuildAliases()
+    wipe(BossTimerAlias)
+    for npcId, def in pairs(BossTimerData) do
+        BossTimerAlias[npcId] = npcId
+        for i = 1, #(def.npcIds or EMPTY) do
+            BossTimerAlias[def.npcIds[i]] = npcId
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Statut
+--------------------------------------------------------------------------------
+
+function M:StatusLines()
+    local lines = {}
+    local config = self:GetConfig() or EMPTY
+    if self.engaged then
+        local def = self.def
+        lines[#lines + 1] = ("engage : |cffffffff%s|r (%s) depuis %s"):format(
+            def.name or tostring(self.engaged), self.kind or "?",
+            FormatClock(GetTime() - self.pullTime))
+        local label = self:PhaseLabel()
+        if label ~= "" then
+            lines[#lines + 1] = ("%s depuis %s"):format(label, FormatClock(GetTime() - self.phaseTime))
+        end
+        if self.lastHealthPct then
+            lines[#lines + 1] = ("vie du boss : %d%%"):format(self.lastHealthPct * 100 + 0.5)
+        end
+        if self.wipeSince then
+            lines[#lines + 1] = "hors combat : verification de wipe en cours"
+        end
+    else
+        lines[#lines + 1] = "aucune rencontre en cours"
+    end
+    local raid, dungeon, world = #self:ListData("raid"), #self:ListData("dungeon"), #self:ListData("world")
+    lines[#lines + 1] = ("data (%s) : %d raid, %d donjon, %d world boss"):format(ns.flavor, raid, dungeon, world)
+    lines[#lines + 1] = ("annonces %s   compte a rebours %s   annonce de phase %s   cadre %s   resume %s"):format(
+        config.announce ~= false and "on" or "off",
+        config.countdown ~= false and "on" or "off",
+        config.phaseAlert ~= false and "on" or "off",
+        config.phaseFrame ~= false and "on" or "off",
+        config.summary ~= false and "on" or "off")
+    lines[#lines + 1] = ("detection : %s%s%s"):format(
+        ns.has.encounterEvents and "ENCOUNTER_START + " or "",
+        ns.has.bossUnitFrames and "unites boss + " or "",
+        "combat log")
+    lines[#lines + 1] = ("fin de combat : %s"):format(
+        ns.has.encounterProgress and "IsEncounterInProgress + combat du groupe"
+            or "combat du groupe (delai de grace)")
+    return lines
+end
+
 --------------------------------------------------------------------------------
 -- Cycle de vie
 --------------------------------------------------------------------------------
@@ -455,15 +1395,37 @@ end
 function M:OnInitialize()
     self:GetGroup(GENERIC_ANCHOR)
     self:CreateSavedOverrideGroups()
+    self:GetPhaseFrame()
+
+    Alerts:Register(ALERT_KEY, {
+        anchorKey    = ALERT_ANCHOR,
+        label        = "Annonce boss",
+        order        = 30,
+        defaultPoint = { "CENTER", "UIParent", "CENTER", 0, 100 },
+        getConfig    = function()
+            local config = self:GetConfig()
+            return config and config.alert
+        end,
+        defaults = ns.PROFILE_DEFAULTS.modules.bossTimer.alert,
+    })
 end
 
 function M:OnEnable()
+    playerGUID = UnitGUID("player")
+    self:BuildAliases()
+
     if ns.has.encounterEvents then
         self:RegisterEvent("ENCOUNTER_START")
         self:RegisterEvent("ENCOUNTER_END")
     end
+    if ns.has.bossUnitFrames then
+        self:RegisterEvent("INSTANCE_ENCOUNTER_ENGAGE_UNIT")
+    end
     self:RegisterRawEvent("COMBAT_LOG_EVENT_UNFILTERED", OnCombatLog)
     self:RegisterEvent("PLAYER_REGEN_ENABLED")
+    self:RegisterEvent("PLAYER_REGEN_DISABLED")
+    self:RegisterEvent("PLAYER_ENTERING_WORLD")
+    self:RegisterEvent("ZONE_CHANGED_NEW_AREA")
     self:RegisterMessage("TEST_STOPPED", function() self:StopTestBoss() end)
 
     local problems = self:ValidateData()
@@ -474,10 +1436,11 @@ function M:OnEnable()
 end
 
 function M:OnDisable()
-    self:Disengage()
+    self:Disengage("disable")
     self:StopTestBoss()
     self:UnregisterAllEvents()
     self:UnregisterAllMessages()
     self:CancelAllTimers()
     self:ClearBars()
+    self:HidePhaseFrame()
 end

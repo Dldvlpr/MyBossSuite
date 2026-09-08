@@ -28,4 +28,6 @@ Modules/InterruptAlert/InterruptAlert.lua
 Modules/MoveAlert/MoveAlert.lua
 
 # Data du flavor vanilla uniquement : aucune data morte chargee sur ce client.
+Modules/BossTimer/Data/vanilla/Blasted_Lands/Lord_Kazzak.lua
 Modules/BossTimer/Data/vanilla/Onyxias_Lair/Onyxia.lua
+Modules/BossTimer/Data/vanilla/Scarlet_Monastery/Herod.lua
