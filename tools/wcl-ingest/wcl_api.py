@@ -10,15 +10,37 @@ on demande et comment on les agrege — reste propre a chaque script.
 from __future__ import annotations
 
 import base64
+import http.server
 import json
 import os
 import pathlib
+import secrets
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 
 TOKEN_URL = "https://www.warcraftlogs.com/oauth/token"
+AUTHORIZE_URL = "https://www.warcraftlogs.com/oauth/authorize"
+
+# Deux endpoints, deux authentifications. `/client` suffit pour tout ce qui est
+# public et se contente du couple ID/secret. `/user` est le seul a servir les
+# rapports ARCHIVES (plus de 2 ans), et il exige un jeton d'UTILISATEUR : c'est
+# l'abonnement du compte qui ouvre les archives, pas la cle applicative.
 API_URL = "https://www.warcraftlogs.com/api/v2/client"
+USER_API_URL = "https://www.warcraftlogs.com/api/v2/user"
+
+# L'endpoint reellement utilise pour la session en cours. Fixe une fois par
+# `authenticate()` : les appelants de `graphql` n'ont pas a savoir sous quelle
+# identite ils tournent.
+ACTIVE_API_URL = API_URL
+
+# Doit correspondre A L'IDENTIQUE a une redirect URL enregistree sur le client
+# API (https://www.warcraftlogs.com/api/clients/). OAuth compare la chaine
+# entiere, port et chemin compris.
+DEFAULT_REDIRECT_PORT = 4480
+REDIRECT_PATH = "/callback"
 
 FLAVORS = ["vanilla", "tbc", "wrath", "cata", "mists", "retail"]
 
@@ -139,15 +161,264 @@ def get_token(client_id: str, client_secret: str) -> str:
         ) from exc
 
 
+# ----------------------------------------------------------------------------
+# Jeton utilisateur (rapports archives)
+# ----------------------------------------------------------------------------
+
+# Le jeton utilisateur et surtout son refresh_token sont des secrets : meme
+# emplacement de confiance que le `.env`, meme exclusion du depot.
+TOKEN_CACHE_NAME = ".wcl-token.json"
+
+# Marge avant expiration : un jeton valide 30 s ne survivra pas a une ingestion
+# de dix logs. Mieux vaut le rafraichir une requete trop tot que planter au
+# milieu d'un passage.
+TOKEN_EXPIRY_MARGIN = 120
+
+
+def token_cache_path() -> pathlib.Path:
+    return DOTENV_DIRS[0] / TOKEN_CACHE_NAME
+
+
+def load_cached_token(now=None) -> str:
+    """Rend un access_token encore valide, ou "" — jamais une exception.
+
+    Un cache illisible, tronque ou d'une version anterieure ne doit pas bloquer
+    l'ingestion : on le traite comme absent et on refait le flux complet.
+    """
+    now = time.time() if now is None else now
+    try:
+        data = json.loads(token_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    token = data.get("access_token") or ""
+    expires_at = data.get("expires_at") or 0
+    if not isinstance(expires_at, (int, float)):
+        return ""
+    if token and expires_at - TOKEN_EXPIRY_MARGIN > now:
+        return token
+    return ""
+
+
+def load_refresh_token() -> str:
+    try:
+        data = json.loads(token_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return (data.get("refresh_token") or "") if isinstance(data, dict) else ""
+
+
+def save_cached_token(payload: dict, now=None) -> None:
+    """Ecrit le cache en 0600. Un echec d'ecriture n'est pas fatal.
+
+    Ne pas pouvoir cacher le jeton coute une re-autorisation au prochain
+    passage ; ca ne justifie pas de faire echouer une ingestion qui, elle, a
+    tout ce qu'il lui faut.
+    """
+    now = time.time() if now is None else now
+    data = {
+        "access_token": payload.get("access_token", ""),
+        "refresh_token": payload.get("refresh_token", ""),
+        "expires_at": now + float(payload.get("expires_in") or 0),
+    }
+    path = token_cache_path()
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _post_token(fields: dict) -> dict:
+    data = urllib.parse.urlencode(fields).encode()
+    request = urllib.request.Request(TOKEN_URL, data=data)
+    request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = " : " + exc.read().decode("utf-8", "replace")[:300]
+        except Exception:  # noqa: BLE001 - le detail est un bonus, jamais un bloqueur
+            pass
+        raise WCLError("echange OAuth refuse (%s)%s" % (exc.code, detail)) from exc
+    except urllib.error.URLError as exc:
+        raise WCLError("echange OAuth injoignable : %s" % exc.reason) from exc
+
+
+def redirect_uri(port: int) -> str:
+    return "http://localhost:%d%s" % (port, REDIRECT_PATH)
+
+
+def build_authorize_url(client_id: str, port: int, state: str) -> str:
+    query = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri(port),
+        "response_type": "code",
+        "state": state,
+    })
+    return "%s?%s" % (AUTHORIZE_URL, query)
+
+
+def extract_code(raw_path: str, expected_state: str) -> str:
+    """Valide la redirection et rend le code d'autorisation.
+
+    Le `state` n'est pas une formalite : sans lui, n'importe quelle page ouverte
+    dans le navigateur pourrait appeler le port local et injecter son propre
+    code d'autorisation.
+    """
+    parsed = urllib.parse.urlparse(raw_path)
+    params = urllib.parse.parse_qs(parsed.query)
+    error = (params.get("error") or [""])[0]
+    if error:
+        description = (params.get("error_description") or [""])[0]
+        raise WCLError(("autorisation refusee : %s %s" % (error, description)).strip())
+    if (params.get("state") or [""])[0] != expected_state:
+        raise WCLError("state OAuth invalide : la redirection ne vient pas de cette session.")
+    code = (params.get("code") or [""])[0]
+    if not code:
+        raise WCLError("aucun code d'autorisation dans la redirection.")
+    return code
+
+
+def _await_authorization(client_id: str, port: int) -> str:
+    """Ouvre le navigateur et attend la redirection sur le port local."""
+    state = secrets.token_urlsafe(24)
+    url = build_authorize_url(client_id, port, state)
+    captured = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - impose par BaseHTTPRequestHandler
+            try:
+                captured["code"] = extract_code(self.path, state)
+                body = "Autorisation accordee. Tu peux fermer cet onglet."
+            except WCLError as exc:
+                captured["error"] = exc
+                body = "Echec : %s" % exc
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+
+        def log_message(self, *args):
+            pass  # le serveur est un detail d'implementation, pas une sortie utile
+
+    try:
+        server = http.server.HTTPServer(("localhost", port), Handler)
+    except OSError as exc:
+        raise WCLError(
+            "port %d indisponible (%s) : ferme ce qui l'occupe, ou choisis un autre "
+            "port avec --auth-port — en pensant a l'enregistrer aussi comme redirect "
+            "URL sur https://www.warcraftlogs.com/api/clients/." % (port, exc)
+        ) from exc
+
+    print("Autorisation WarcraftLogs necessaire (rapports archives).")
+    print("Si le navigateur ne s'ouvre pas, va sur :")
+    print("    %s" % url)
+    try:
+        webbrowser.open(url)
+    except Exception:  # noqa: BLE001 - l'URL est affichee, l'ouverture est un confort
+        pass
+
+    with server:
+        server.timeout = 300
+        server.handle_request()
+
+    if "error" in captured:
+        raise captured["error"]
+    if "code" not in captured:
+        raise WCLError("aucune redirection recue en 5 minutes : autorisation abandonnee.")
+    return captured["code"]
+
+
+def get_user_token(client_id: str, client_secret: str, port: int = DEFAULT_REDIRECT_PORT) -> str:
+    """Jeton utilisateur, du moins cher au plus cher : cache, refresh, navigateur."""
+    cached = load_cached_token()
+    if cached:
+        return cached
+
+    refresh = load_refresh_token()
+    if refresh:
+        try:
+            payload = _post_token({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            })
+            save_cached_token(payload)
+            return payload["access_token"]
+        except WCLError:
+            pass  # refresh perime ou revoque : on retombe sur le flux complet
+
+    code = _await_authorization(client_id, port)
+    payload = _post_token({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri(port),
+        "client_id": client_id,
+        "client_secret": client_secret,
+    })
+    save_cached_token(payload)
+    return payload["access_token"]
+
+
+def authenticate(client_id: str, client_secret: str, user_auth: bool = False,
+                 port: int = DEFAULT_REDIRECT_PORT) -> str:
+    """Point d'entree unique : choisit le flux ET l'endpoint qui va avec.
+
+    Les deux vont ensemble — un jeton utilisateur sur `/client` est refuse, et
+    l'inverse aussi. Les lier ici evite d'avoir a y penser ailleurs.
+    """
+    global ACTIVE_API_URL
+    if user_auth:
+        ACTIVE_API_URL = USER_API_URL
+        return get_user_token(client_id, client_secret, port)
+    ACTIVE_API_URL = API_URL
+    return get_token(client_id, client_secret)
+
+
+ARCHIVED_HINT = (
+    "Ce rapport est archive (plus de 2 ans). Les archives ne sont servies que par "
+    "l'endpoint /user, avec un compte abonne : relance la commande avec --user-auth "
+    "(un navigateur s'ouvrira une fois pour autoriser l'acces).\n"
+    "La redirect URL de ton client API doit valoir exactement %s — "
+    "https://www.warcraftlogs.com/api/clients/"
+)
+
+
+def is_archived_error(errors) -> bool:
+    """Reconnait l'erreur "rapport archive" parmi les erreurs GraphQL.
+
+    Compare sur le texte parce que l'API ne donne pas de code machine pour ce
+    cas. Le test reste large (un mot, insensible a la casse) : rater la
+    detection ne coute qu'un message d'erreur moins clair, jamais un faux
+    positif dommageable.
+    """
+    return "archived" in json.dumps(errors).lower()
+
+
 def graphql(token: str, query: str, variables: dict) -> dict:
     payload = json.dumps({"query": query, "variables": variables}).encode()
-    request = urllib.request.Request(API_URL, data=payload)
+    request = urllib.request.Request(ACTIVE_API_URL, data=payload)
     request.add_header("Authorization", "Bearer " + token)
     request.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(request, timeout=60) as response:
-        body = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise WCLError("API WarcraftLogs : HTTP %s" % exc.code) from exc
+    except urllib.error.URLError as exc:
+        raise WCLError("API WarcraftLogs injoignable : %s" % exc.reason) from exc
     if "errors" in body:
-        raise WCLError(json.dumps(body["errors"], indent=2))
+        errors = body["errors"]
+        # Le message brut de l'API ne dit pas quoi FAIRE : il mentionne
+        # l'endpoint /user sans dire qu'il demande une autre authentification.
+        if is_archived_error(errors) and ACTIVE_API_URL != USER_API_URL:
+            raise WCLError(ARCHIVED_HINT % redirect_uri(DEFAULT_REDIRECT_PORT))
+        raise WCLError(json.dumps(errors, indent=2))
     return body["data"]
 
 

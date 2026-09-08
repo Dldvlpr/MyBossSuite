@@ -4,3 +4,5 @@ __pycache__/
 
 # Identifiants WarcraftLogs : jamais dans le depot.
 .env
+# Jeton utilisateur OAuth (contient un refresh_token).
+.wcl-token.json
