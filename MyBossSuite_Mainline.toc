@@ -42,6 +42,11 @@ Core/ModuleLoader.lua
 
 Modules/SwingTimer/SwingTimer.lua
 Modules/BossTimer/BossTimer.lua
+# Le pont vers DBM/BigWigs apres le moteur : il ne fait que lui rendre la main.
+Modules/BossTimer/Bridge.lua
+# La data extraite localement (tools/bossmod-extract) : lue au demarrage du
+# module, jamais versionnee ici.
+Modules/BossTimer/Extracted.lua
 Modules/InterruptAlert/InterruptAlert.lua
 Modules/MoveAlert/MoveAlert.lua
 Modules/CDTracker/CDTracker.lua

@@ -548,6 +548,19 @@ function M:StatusLines()
     }
 end
 
+--- Les interrupts d'un porteur, en clair. Un porteur en a parfois deux (Pummel
+-- et Bouclier percutant) : les deux comptent pour son tour, donc les deux
+-- s'affichent.
+local function SpellNames(entry)
+    local spells = entry.spells
+    if not spells or #spells == 0 then return "?" end
+    local names = {}
+    for i = 1, #spells do
+        names[i] = ns.GetSpellName(spells[i]) or ("sort " .. tostring(spells[i]))
+    end
+    return table.concat(names, ", ")
+end
+
 --- Ce que /mbs rotation list affiche : la file, avec l'etat de chacun.
 function M:ListLines()
     local queue = self:Queue()
@@ -559,7 +572,7 @@ function M:ListLines()
             (designated and entry.unit == designated.unit) and COLOR_TURN or COLOR_WAIT,
             i, ShortName(entry.unit),
             entry.ready and "pret" or ("%.1fs"):format(entry.remaining),
-            ns.GetSpellName(entry.spellId) or ("sort " .. tostring(entry.spellId)))
+            SpellNames(entry))
     end
     return out
 end

@@ -543,7 +543,7 @@ Prévois quand même le cas des mécaniques non déterministes (certains casts s
 - [ ] Fichier : `WTF/Account/<COMPTE>/SavedVariables/WeakAuras.lua`
 - [ ] Table `WeakAurasSaved.displays["<nom>"]`, champ `trigger.type` :
   - `"EVENT"` (`COMBAT_LOG_EVENT_UNFILTERED` + spellIds) → extraction directe vers le format Phase 1
-  - `"BOSS_MOD"` → wrapper DBM/BigWigs, pas autonome, aucune valeur extractible
+  - `"BOSS_MOD"` → wrapper DBM/BigWigs, pas autonome, aucune valeur extractible **du fichier**. La durée n'existe qu'au moment où le boss mod la publie, en jeu : c'est exactement ce que va chercher la phase 3d.
 
 Compte avant de coder quoi que ce soit :
 
@@ -571,6 +571,84 @@ Aucun des deux n'accorde de droit de dériver hors de son propre dépôt. Passer
 La seule porte qui reste est explicitement nommée par BigWigs : *demander*. Une autorisation écrite des auteurs, pour un usage précis. Tant qu'elle n'existe pas, WCL est la source unique — ce qui ne change rien au plan réel, puisque 3a est de toute façon la seule source qui donne de la data **par version de jeu**.
 
 Ordre par boss : **3a** → 3b si une aura `EVENT` existe déjà et couvre le cas → 3c uniquement avec une autorisation écrite.
+
+### 3d. Pont runtime vers DBM/BigWigs — fait
+
+- [x] `Modules/BossTimer/Bridge.lua`
+
+Ce que 3c ferme, c'est l'**extraction** : écrire dans `Modules/BossTimer/Data/` des timings tirés de deux projets *All Rights Reserved*. Ce n'est pas la même chose que **lire ce que ces addons émettent chez le joueur qui les a installés**. WeakAuras le fait depuis des années avec son trigger `BOSS_MOD` (cf. 3b), sans rien copier de leur code ni de leur data : le boss mod tourne dans le client de l'utilisateur, publie des callbacks, et un autre addon s'y abonne.
+
+C'est exactement ce que fait le pont, et c'est tout ce qu'il fait :
+
+| | 3c — extraction | 3d — pont runtime |
+|---|---|---|
+| Ce qui est lu | les fichiers du dépôt amont | les callbacks émis en jeu |
+| Où ça atterrit | dans `Data/`, versionné, redistribué | à l'écran, chez ce joueur, cette session |
+| Œuvre dérivée | oui | non |
+| Marche sans DBM installé | oui | **non** |
+
+Cette dernière ligne est la raison pour laquelle 3d ne remplace pas 3a. Le pont **emprunte**, il ne mesure rien : il ne couvre que les joueurs qui ont déjà un boss mod, et la data mesurée reste ce qui rendra MyBossSuite autonome.
+
+Surfaces utilisées, telles que les deux addons les publient :
+
+```
+DBM      DBM:RegisterCallback(event, fn)
+         DBM_TimerStart / TimerStop / TimerUpdate / TimerPause / TimerResume
+         DBM_SetStage, DBM_Pull, DBM_Kill, DBM_Wipe
+
+BigWigs  BigWigsLoader.RegisterMessage(cible, message, fn)
+         BigWigs_StartBar / StopBar / StopBars / PauseBar / ResumeBar
+         BigWigs_SetStage, BigWigs_OnBossEngage / OnBossWin / OnBossWipe
+```
+
+Décisions qui tiennent le module :
+
+- **Préséance absolue de la data maison.** Le pont ne parle que là où `ns.BossTimerData` n'a rien. Un `Engage` réel efface ses barres et le rend muet — deux sources pour la même capacité, c'est une de trop. C'est aussi ce qui garantit qu'il ne masquera jamais une régression de la data : si les barres mesurées disparaissent, celles de DBM ne prennent pas leur place en silence.
+- **Chaque barre porte sa source** (`DBM`, `BW`) et sort sur une ancre à part. Un chiffre de DBM n'est pas une mesure de MyBossSuite ; l'afficher comme telle serait le seul vrai mensonge que ce module puisse commettre.
+- **Validation à l'arrivée.** Les positions d'arguments de ces callbacks ne sont garanties par personne. Une durée non numérique, nulle ou supérieure à une heure est comptée en « refusée » et n'affiche rien ; `/mbs boss` montre le compteur. Une barre absente se remarque et se corrige, une barre fausse se croit.
+- **Test de préséance en tête de chaque handler**, ce qui rend le décrochage des callbacks facultatif : même laissés en place par un amont qui ne sait pas les retirer, ils ne font plus rien.
+- **Identité d'une barre BigWigs = son texte**, pas sa clé : `BigWigs_StartBar` donne les deux, `BigWigs_StopBar` ne donne que le texte. S'indexer sur la clé rendrait chaque arrêt inopérant.
+- **Rien n'est rediffusé au groupe.** Une phase lue chez DBM n'est pas une observation : le drapeau anti-écho de `Core/Comm.lua` la retient. Chaque joueur a son propre boss mod.
+- **Ni annonces, ni sons, ni special warnings.** DBM les émet déjà chez le joueur ; les doubler serait du bruit.
+- **Engage générique sur un pull annoncé.** Sur vanilla, TBC et Wrath, `ENCOUNTER_START` n'existe pas et le moteur maison exige un npcId connu : sans data, il n'y a aujourd'hui aucun chronomètre. `DBM_Pull` / `BigWigs_OnBossEngage` en donnent un, et le chemin d'upgrade existant reprend la main dès qu'un npcId connu agit, sans perdre l'heure du pull. Symétriquement, un kill annoncé par le boss mod ne clôt **que** la rencontre que le pont avait lui-même ouverte.
+
+Réglage : `/mbs boss pont on|off` (actif par défaut).
+
+### 3e. Extraction depuis les boss mods installés — fait, hors dépôt
+
+- [x] `tools/bossmod-extract/`
+
+La 3c est fermée parce qu'elle proposait de **versionner** de la data dérivée de deux projets *All Rights Reserved*. La 3d contourne par le runtime, mais elle ne couvre que les joueurs qui font tourner un boss mod. La 3e est le troisième point de l'espace : lire les modules DBM et BigWigs **installés sur ta machine**, et en générer un addon compagnon qui reste à côté du client.
+
+| | 3c — extraction versionnée | 3d — pont runtime | 3e — extraction locale |
+|---|---|---|---|
+| Ce qui est lu | les fichiers du dépôt amont | les callbacks émis en jeu | les fichiers installés chez toi |
+| Où ça atterrit | dans `Data/`, versionné, redistribué | à l'écran, cette session | dans `Interface/AddOns/`, chez toi |
+| Redistribué | oui | non | **non** |
+| Marche sans DBM installé | oui | non | non (mais survit à sa désactivation) |
+
+La ligne « redistribué » est la seule qui compte, et elle est tenue par du code, pas par une phrase : `--out` refuse tout chemin situé dans le dépôt, `MyBossSuite_BossModData/` est dans le `.gitignore`, et un test le vérifie. Deux verrous plutôt qu'une bonne intention.
+
+**Pourquoi lire la source plutôt qu'exécuter un shim.** La 3c pariait sur `dofile` + un shim. Ça n'attrape que ce qui s'exécute au chargement : chez DBM, les déclarations de timers, mais pas les durées qui comptent (`timer:Start(28.5)`, dans les gestionnaires) ; chez BigWigs, rien du tout. `lua_source.py` scanne donc la source — masque de même longueur où commentaires et chaînes sont neutralisés, appariement des blocs (`while ... do` compté par son `do`, jamais deux fois), découpage des appels — et les deux lecteurs posent leurs règles dessus.
+
+Ce que chaque source donne :
+
+- **DBM** : la déclaration donne le sort et la durée par défaut, la branche `args:IsSpell(id)` du gestionnaire dit le déclencheur. Les cadences variables (`"v9.7-35.6"`) sortent avec leur borne basse et le drapeau `variable`. Pas de phases : le module appelle `SetStage(phase)` avec une variable.
+- **BigWigs** : une fonction par déclencheur, et `self:Log(sous-événement, "Gestionnaire", sortIds)` qui dit laquelle. Il livre en plus les **phases**, avec le fragment de texte localisé qui les déclenche (`L.stage2_yell_trigger = "from above"`) — exactement la forme d'un trigger `EMOTE`.
+
+Quand les deux couvrent le même boss, les lectures fusionnent : BigWigs mène, DBM comble, et un désaccord est écrit en commentaire (`-- dbm dit time = 11.3`) au lieu d'être arbitré en silence.
+
+Décisions qui tiennent l'outil :
+
+- **Ce qui n'est pas littéral n'est pas extrait**, et surtout : une durée explicitement remplacée par une expression illisible ne retombe **pas** sur la valeur déclarée. Le module l'a remplacée exprès ; y revenir donnerait un chiffre plausible et faux. C'est le bug que les tests ont attrapé.
+- **Le `.toc` par flavor décide des fichiers**, pas un parcours de dossiers. DBM installe les packs de toutes les extensions dans chaque client ; marcher récursivement donnait 843 rencontres sur Classic Era, dont l'essentiel mort. Le `.toc` du flavor en donne 186, toutes vivantes.
+- **Le flavor est lu dans `.build.info`**, jamais deviné depuis le nom du dossier. `_classic_` a été Vanilla, TBC, Wrath, Cata, et vaut Mists aujourd'hui. Sans certitude, l'outil s'arrête.
+- **Le compagnon déclare son flavor** et `Modules/BossTimer/Extracted.lua` le refuse **en bloc** s'il ne correspond pas au client.
+- **Préséance** : `data du dépôt > data extraite > pont live`. Une entrée relue par quelqu'un passe toujours devant une entrée extraite, même provisoire.
+
+Mesuré sur l'installation de référence : 186 rencontres sur Classic Era, 214 sur TBC, 371 sur retail — toutes validées par `ValidateData` du moteur, zéro problème. Sur le client Mists, la copie de DBM installée n'a aucun `.toc` Mists : rien n'est généré, ce qui est la bonne réponse.
+
+Ce que ça ne change pas : **3a reste la seule source de data mesurée**. La 3e emprunte des estimations, elle n'en produit aucune.
 
 ---
 
@@ -854,5 +932,5 @@ README.md
 - **Vanilla 1.x : jusqu'où ?** `C_Timer.NewTimer` et `C_NamePlate` manquent sur les builds les plus anciens. Soit tu écris un scheduler `OnUpdate` maison dans Compat, soit tu poses un plancher (ex. Classic Era actuel plutôt que 1.12 littéral) et tu le documentes. Décider maintenant : ça conditionne la moitié de Compat.
 - **Data par flavor : dossiers séparés ou table d'overrides ?** Dossiers = plus lisible et pas de data morte chargée, overrides = moins de duplication quand les timings sont identiques. Le choix impacte le générateur WCL, donc à trancher avant d'écrire `tools/wcl-ingest`.
 - **WeakAuras : ratio `EVENT` vs `BOSS_MOD` ?** Le `grep` de la Phase 3b répond en 30 secondes et détermine si 3b vaut le code qu'il demande.
-- ~~**BigWigs/DBM : acceptes-tu de passer l'addon sous GPL ?**~~ **Tranché, et la question était mal posée.** L'addon est sous **GPL v3** (`LICENSE` à la racine, `## X-License` dans les six `.toc`). Mais ça n'ouvre pas 3c : DBM et BigWigs sont *All Rights Reserved*, pas GPL — voir 3c. WCL est la source unique, ce qui rend l'ingestion critique.
+- ~~**BigWigs/DBM : acceptes-tu de passer l'addon sous GPL ?**~~ **Tranché, et la question était mal posée.** L'addon est sous **GPL v3** (`LICENSE` à la racine, `## X-License` dans les six `.toc`). Mais ça n'ouvre pas 3c : DBM et BigWigs sont *All Rights Reserved*, pas GPL — voir 3c. WCL reste la source unique de data **écrite**, ce qui rend l'ingestion critique ; ce que la 3d ajoute est d'une autre nature — lire leurs callbacks en jeu, sans rien versionner.
 - ~~**CD Tracker : LibOpenRaid tourne-t-elle sur tes flavors classic ?**~~ **Non — répondu par le code, sans test en jeu.** `LibOpenRaid.lua` sort en tête de fichier sur tout client non retail (`--don't load if it's not retail, emergencial patch due to classic and bcc stuff not transposed yet`). Sur les cinq flavors classic, `LIB_OPEN_RAID_CAN_LOAD` reste `false` et rien ne se déclare dans LibStub. Voir `Modules/CDTracker/Libs/README.md`.

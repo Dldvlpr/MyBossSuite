@@ -28,6 +28,10 @@ gratuit), puis un fichier `.env` a la racine du depot (voir `.env.example`) :
 Les variables d'environnement font aussi l'affaire et restent prioritaires
 (bash : `export WCL_CLIENT_ID=...` ; PowerShell : `$env:WCL_CLIENT_ID = '...'`).
 
+Les rapports de plus de 2 ans sont ARCHIVES et invisibles pour la cle
+applicative : `--user-auth` bascule sur l'endpoint /user (compte abonne requis,
+autorisation dans le navigateur une seule fois).
+
 Exemples :
 
     # decouverte automatique des logs via le classement de la rencontre
@@ -57,15 +61,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wa-extract"))
 import lua_table  # noqa: E402
 import wcl_phases  # noqa: E402
 from wcl_api import (  # noqa: E402
+    DEFAULT_REDIRECT_PORT,
     FLAVORS,
+    SCOPES,
+    TOKEN_CACHE_NAME,
     WCLError,
+    authenticate,
     discover_reports,
     fetch_events,
+    fetch_current_user,
     fetch_fight,
+    fetch_fights,
     fetch_phase_transitions,
-    get_token,
     load_credentials,
     parse_report_arg,
+    token_scopes,
 )
 
 # Au-dela de cet ecart-type (en secondes) sur les deltas, le timing est traite
@@ -88,11 +98,12 @@ PHASE_INTERVAL_STDEV = 1.5
 PHASE_HINT_SHARE = 0.6
 
 
-def fetch_casts(token: str, code: str, fight_id: int, start: float):
-    return fetch_events(token, code, fight_id, start, "Casts", "Enemies")
+def fetch_casts(token: str, code: str, fight_id: int, start: float, end: float):
+    return fetch_events(token, code, fight_id, start, end, "Casts", "Enemies")
 
 
-def fetch_boss_damage(token: str, code: str, fight_id: int, start: float, target_ids):
+def fetch_boss_damage(token: str, code: str, fight_id: int, start: float, end: float,
+                      target_ids):
     """Degats subis par le boss — c'est ce qui porte sa vie, donc sa courbe.
 
     Le filtre est evalue par WCL : sans lui on rapatrie les degats de tout le
@@ -101,10 +112,10 @@ def fetch_boss_damage(token: str, code: str, fight_id: int, start: float, target
     """
     expression = " or ".join("target.id = %d" % actor_id for actor_id in sorted(target_ids))
     try:
-        return fetch_events(token, code, fight_id, start, "DamageDone", "Friendlies",
+        return fetch_events(token, code, fight_id, start, end, "DamageDone", "Friendlies",
                             expression or None)
     except WCLError:
-        return fetch_events(token, code, fight_id, start, "DamageDone", "Friendlies")
+        return fetch_events(token, code, fight_id, start, end, "DamageDone", "Friendlies")
 
 
 def needs_health_curve(phases) -> bool:
@@ -148,7 +159,8 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
     for code, fight_id in reports:
         try:
             fight, actors, _ = fetch_fight(token, code, fight_id)
-            events = fetch_casts(token, code, fight_id, float(fight["startTime"]))
+            events = fetch_casts(token, code, fight_id, float(fight["startTime"]),
+                                 float(fight["endTime"]))
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} ignore ({exc})", file=sys.stderr)
             continue
@@ -170,7 +182,47 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
             by_ability[ability].append((float(event["timestamp"]) - pull) / 1000.0)
 
         if not by_ability:
+            # Sans le detail, ce message est un cul-de-sac : il ne dit pas si le
+            # combat est vide, si le npcId est faux, ou si le fightID ne
+            # correspond pas au boss vise. Les NPC qui ont REELLEMENT casté sont
+            # la reponse, et elle est deja dans les evenements qu'on vient de
+            # lire — ne pas l'afficher serait la jeter.
+            seen = defaultdict(int)
+            for event in events:
+                if event.get("type") not in ("cast", "begincast"):
+                    continue
+                source = actors.get(event.get("sourceID"))
+                if source is None or source.get("type") == "Player":
+                    continue
+                game_id = source.get("gameID")
+                if game_id is not None:
+                    seen[(game_id, source.get("name") or "?")] += 1
             print(f"  ! {code}:{fight_id} : aucun cast ennemi retenu", file=sys.stderr)
+            # Le combat lui-meme situe le probleme : un nom et un encounterID
+            # disent tout de suite si le fightID designe le bon pull.
+            print("      combat : %s (encounterID %s), %d evenement(s) recus"
+                  % (fight.get("name") or "?", fight.get("encounterID"), len(events)),
+                  file=sys.stderr)
+            if not events:
+                # Distinction qui compte : zero evenement sur un combat de boss
+                # n'est pas un mauvais npcId, c'est un rapport qui ne rend pas
+                # son contenu — le cas typique d'une archive a moitie rendue.
+                print("      Le rapport n'a rendu AUCUN evenement. Ce n'est pas un "
+                      "probleme de --npc-id : soit le fightID ne designe aucun "
+                      "combat reel, soit le rapport (archive) ne sert pas encore "
+                      "son contenu a l'API.", file=sys.stderr)
+            elif seen:
+                detail = ", ".join(
+                    "%s (npcId %s, %d casts)" % (name, game_id, count)
+                    for (game_id, name), count in sorted(seen.items(), key=lambda kv: -kv[1])[:8])
+                print("      NPC ayant caste dans ce combat : %s" % detail, file=sys.stderr)
+                if npc_id is not None:
+                    print("      --npc-id %s ne correspond a aucun d'eux." % npc_id,
+                          file=sys.stderr)
+            else:
+                print("      aucun NPC n'a caste : ce combat est probablement du "
+                      "trash, ou le fightID ne designe pas le boss vise.",
+                      file=sys.stderr)
             continue
 
         used += 1
@@ -223,7 +275,8 @@ def situate_phases(token, code, fight_id, fight, actors, npc_id, phases,
         target_ids = [actor_id for actor_id, actor in actors.items()
                       if actor.get("gameID") == npc_id] if npc_id is not None else []
         try:
-            damage = fetch_boss_damage(token, code, fight_id, pull, target_ids)
+            damage = fetch_boss_damage(token, code, fight_id, pull,
+                                       float(fight["endTime"]), target_ids)
             curve = wcl_phases.health_curve(damage, actors, npc_id, pull)
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} : courbe de vie indisponible ({exc})",
@@ -683,17 +736,24 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # Les diagnostics ne decrivent aucune ingestion : leur imposer --npc-id,
+    # --boss et le reste en ferait des outils qu'on ne peut pas lancer quand on
+    # en a justement besoin, c'est-a-dire avant de savoir quoi ingerer. C'est
+    # meme le sens de --list-fights, qui sert a TROUVER un de ces arguments.
+    DIAGNOSTICS = ("--whoami", "--list-fights")
+    given = sys.argv[1:] if argv is None else argv
+    needed = not any(arg.split("=")[0] in DIAGNOSTICS for arg in given)
     parser.add_argument("--report", action="append", default=[], metavar="CODE:FIGHT",
                         help="log a analyser, repetable")
     parser.add_argument("--encounter", type=int, help="encounterID WCL (decouverte automatique des logs)")
     parser.add_argument("--partition", type=int, help="partition WCL (une par version/saison)")
-    parser.add_argument("--npc-id", type=int, required=True, help="npcId du boss, cle du fichier de data")
-    parser.add_argument("--flavor", required=True, choices=FLAVORS)
-    parser.add_argument("--raid", required=True, help="dossier de zone (raid, donjon ou zone de monde), ex. Onyxias_Lair")
+    parser.add_argument("--npc-id", type=int, required=needed, help="npcId du boss, cle du fichier de data")
+    parser.add_argument("--flavor", required=needed, choices=FLAVORS)
+    parser.add_argument("--raid", required=needed, help="dossier de zone (raid, donjon ou zone de monde), ex. Onyxias_Lair")
     parser.add_argument("--kind", default="raid", choices=["raid", "dungeon", "world"],
                         help="nature de la rencontre : raid (defaut), dungeon ou world (world boss)")
     parser.add_argument("--zone", help="nom de zone affiche par /mbs boss list")
-    parser.add_argument("--boss", required=True, help="nom du boss (affichage + nom de fichier)")
+    parser.add_argument("--boss", required=needed, help="nom du boss (affichage + nom de fichier)")
     parser.add_argument("--limit", type=int, default=10, help="nombre de logs (defaut 10)")
     parser.add_argument("--min-reports", type=int, default=2,
                         help="nombre minimum de logs ou un sort doit apparaitre (defaut 2)")
@@ -705,6 +765,24 @@ def parse_args(argv=None):
                         help="n'essaie pas de situer les bornes de phase : les timers "
                              "PHASE gardent leur `time` ecrit a la main et aucune "
                              "proposition n'est faite. Economise les requetes de degats.")
+    parser.add_argument("--user-auth", action="store_true",
+                        help="s'authentifie comme UTILISATEUR (endpoint /user) au lieu "
+                             "de la cle applicative : seule facon de lire les rapports "
+                             "archives (plus de 2 ans), et demande un compte abonne. "
+                             "Ouvre le navigateur une fois, puis reutilise le jeton cache.")
+    parser.add_argument("--auth-port", type=int, default=DEFAULT_REDIRECT_PORT,
+                        help="port d'ecoute de la redirection OAuth (defaut %d). Doit "
+                             "correspondre a la redirect URL enregistree sur le client API."
+                             % DEFAULT_REDIRECT_PORT)
+    parser.add_argument("--list-fights", metavar="CODE",
+                        help="diagnostic : liste les combats du rapport CODE avec leur "
+                             "fightID, puis sort. C'est le nombre a mettre apres les "
+                             "deux-points dans --report CODE:FIGHT.")
+    parser.add_argument("--whoami", action="store_true",
+                        help="diagnostic : affiche le compte associe au jeton et sort. "
+                             "Implique --user-auth. Un compte affiche prouve que "
+                             "l'autorisation porte bien les scopes ; si les archives "
+                             "restent refusees ensuite, c'est l'abonnement qui est en cause.")
     parser.add_argument("--dry-run", action="store_true", help="affiche les stats sans ecrire de fichier")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -755,6 +833,58 @@ def resolve_out(args) -> Path:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    # Avant tout le reste : les diagnostics ne decrivent aucune ingestion, ils ne
+    # doivent toucher ni au fichier de sortie ni aux arguments qui le nomment.
+    if args.list_fights:
+        try:
+            client_id, client_secret = load_credentials()
+            token = authenticate(client_id, client_secret, args.user_auth, args.auth_port)
+            title, fights = fetch_fights(token, args.list_fights)
+        except WCLError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        if not fights:
+            print("aucun combat dans ce rapport.", file=sys.stderr)
+            return 2
+        print("%s — %d combat(s) :" % (title or args.list_fights, len(fights)))
+        for fight in fights:
+            duration = (float(fight.get("endTime") or 0) - float(fight.get("startTime") or 0)) / 1000.0
+            # L'encounterID separe un boss du trash : a 0, ce n'est pas une
+            # rencontre, et un fightID qui pointe la ne donnera jamais rien.
+            kind = "boss" if fight.get("encounterID") else "trash"
+            print("  --report %s:%-4s %-28s %-6s %5.0f s%s"
+                  % (args.list_fights, fight.get("id"), fight.get("name") or "?",
+                     kind, duration, "  (kill)" if fight.get("kill") else ""))
+        return 0
+
+    if args.whoami:
+        try:
+            client_id, client_secret = load_credentials()
+            token = authenticate(client_id, client_secret, True, args.auth_port)
+            user = fetch_current_user(token)
+        except WCLError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        if not user:
+            print("Le jeton ne represente aucun compte : l'autorisation n'a pas "
+                  "accorde les scopes attendus (%s). Supprime %s et recommence."
+                  % (" ".join(SCOPES), TOKEN_CACHE_NAME), file=sys.stderr)
+            return 2
+        print("compte  : %s (id %s)" % (user.get("name", "?"), user.get("id", "?")))
+        granted = token_scopes(token)
+        print("scopes  : %s" % (" ".join(granted) if granted else "(illisibles)"))
+        missing = [s for s in SCOPES if s not in granted]
+        if granted and missing:
+            print("manquant: %s — reautorise apres avoir supprime %s"
+                  % (" ".join(missing), TOKEN_CACHE_NAME))
+        elif granted:
+            print("Les scopes sont complets. Si un rapport archive reste refuse, "
+                  "c'est un droit du COMPTE qui manque, pas l'autorisation : "
+                  "verifie que %s est bien l'abonne, en ouvrant un de ces rapports "
+                  "sur le site." % user.get("name", "?"))
+        return 0
+
     out = resolve_out(args)
 
     # Relu avant le moindre appel API : un fichier qu'on ne sait pas relire doit
@@ -776,7 +906,7 @@ def main(argv=None) -> int:
 
     try:
         client_id, client_secret = load_credentials()
-        token = get_token(client_id, client_secret)
+        token = authenticate(client_id, client_secret, args.user_auth, args.auth_port)
     except WCLError as exc:
         print(exc, file=sys.stderr)
         return 2

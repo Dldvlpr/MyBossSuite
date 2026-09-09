@@ -68,12 +68,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wcl_api import (  # noqa: E402
+    DEFAULT_REDIRECT_PORT,
     FLAVORS,
     WCLError,
+    authenticate,
     discover_reports,
     fetch_events,
     fetch_fight,
-    get_token,
     load_credentials,
     parse_report_arg,
 )
@@ -123,7 +124,7 @@ def collect_interrupts(token, reports, npc_id, verbose):
             fight, actors, abilities = fetch_fight(token, code, fight_id)
             # hostilityType Friendlies : la source d'un kick est un joueur.
             events = fetch_events(token, code, fight_id, float(fight["startTime"]),
-                                  "Interrupts", "Friendlies")
+                                  float(fight["endTime"]), "Interrupts", "Friendlies")
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} ignore ({exc})", file=sys.stderr)
             continue
@@ -245,8 +246,9 @@ def collect_zones(token, reports, npc_id, verbose):
         try:
             fight, actors, abilities = fetch_fight(token, code, fight_id)
             start = float(fight["startTime"])
-            damage = fetch_events(token, code, fight_id, start, "DamageTaken", "Friendlies")
-            debuffs = fetch_events(token, code, fight_id, start, "Debuffs", "Friendlies")
+            end = float(fight["endTime"])
+            damage = fetch_events(token, code, fight_id, start, end, "DamageTaken", "Friendlies")
+            debuffs = fetch_events(token, code, fight_id, start, end, "Debuffs", "Friendlies")
         except (WCLError, urllib.error.URLError) as exc:
             print(f"  ! {code}:{fight_id} ignore ({exc})", file=sys.stderr)
             continue
@@ -432,6 +434,15 @@ def parse_args(argv=None):
     parser.add_argument("--out", help="chemin de sortie (un seul mode a la fois)")
     parser.add_argument("--replace", action="store_true",
                         help="repart d'un fichier vide au lieu de fusionner l'existant")
+    parser.add_argument("--user-auth", action="store_true",
+                        help="s'authentifie comme UTILISATEUR (endpoint /user) au lieu "
+                             "de la cle applicative : seule facon de lire les rapports "
+                             "archives (plus de 2 ans), et demande un compte abonne. "
+                             "Ouvre le navigateur une fois, puis reutilise le jeton cache.")
+    parser.add_argument("--auth-port", type=int, default=DEFAULT_REDIRECT_PORT,
+                        help="port d'ecoute de la redirection OAuth (defaut %d). Doit "
+                             "correspondre a la redirect URL enregistree sur le client API."
+                             % DEFAULT_REDIRECT_PORT)
     parser.add_argument("--dry-run", action="store_true", help="affiche sans rien ecrire")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -505,7 +516,7 @@ def main(argv=None) -> int:
 
     try:
         client_id, client_secret = load_credentials()
-        token = get_token(client_id, client_secret)
+        token = authenticate(client_id, client_secret, args.user_auth, args.auth_port)
     except WCLError as exc:
         print(exc, file=sys.stderr)
         return 2

@@ -59,6 +59,8 @@ local FILES = {
     "Core/ModuleLoader.lua",
     "Modules/SwingTimer/SwingTimer.lua",
     "Modules/BossTimer/BossTimer.lua",
+    "Modules/BossTimer/Bridge.lua",
+    "Modules/BossTimer/Extracted.lua",
     "Modules/InterruptAlert/InterruptAlert.lua",
     "Modules/MoveAlert/MoveAlert.lua",
     "Modules/CDTracker/CDTracker.lua",
@@ -747,6 +749,200 @@ if retail then
     Mock.FireEvent("ENCOUNTER_END", 4243, "Conseil des Tests", 1, 40, 1)
     equal(boss.engaged, nil, "fin de rencontre")
 end
+
+--------------------------------------------------------------------------------
+
+suite("Pont boss mod (DBM / BigWigs)")
+-- Aucune data n'est extraite de DBM ni de BigWigs : le pont ecoute leurs
+-- callbacks publics chez le joueur. Ce qui est teste ici, c'est la lecture —
+-- forme des arguments, preseance de la data maison, et refus de ce qui n'a pas
+-- la bonne tete.
+local bridge = ns.BossTimerBridge
+Mock.groupSize = 0
+Mock.units.target = nil
+boss:Disengage("manual")
+
+local bridgeGroup = ns.Bars.groups["BossTimer_Bridge"]
+ok(bridgeGroup ~= nil, "ancre du pont creee des l'initialisation")
+ok(bridge:StatusLine():find("aucun boss mod", 1, true) ~= nil,
+    "sans boss mod installe, le pont le dit")
+
+-- DBM se charge apres nous : c'est ADDON_LOADED qui rattrape.
+equal(bridge.hooked.dbm, nil, "DBM pas encore branche")
+Mock.InstallDBM()
+Mock.FireEvent("ADDON_LOADED", "DBM-Core")
+equal(bridge.hooked.dbm, true, "DBM branche au chargement differe")
+ok(Mock.FireDBM("DBM_TimerStart", "Timer17086", "Flame Breath", 25, "icon-17086") > 0,
+    "callback DBM pose")
+
+local dbmBar = bridgeGroup:GetBar("dbm:Timer17086")
+ok(dbmBar ~= nil, "barre reprise de DBM affichee")
+equal(dbmBar.duration, 25, "duree reprise telle quelle")
+ok(dbmBar.text:find("DBM", 1, true) ~= nil, "la barre porte sa source")
+ok(dbmBar.text:find("Flame Breath", 1, true) ~= nil, "libelle du timer conserve")
+
+-- Ce qui n'a pas la forme attendue est compte, pas affiche : si DBM reordonne
+-- ses arguments un jour, on veut un compteur qui monte, pas des barres fausses.
+local refused = bridge.stats.ignored
+Mock.FireDBM("DBM_TimerStart", "TimerBidon", "Bidon", "pas un nombre")
+Mock.FireDBM("DBM_TimerStart", "TimerBidon2", "Bidon", 99999)
+equal(bridge.stats.ignored, refused + 2, "duree absurde ou non numerique refusee")
+equal(bridgeGroup:GetBar("dbm:TimerBidon"), nil, "aucune barre pour un timer refuse")
+
+-- Recalage, pause, reprise : Core/Bars.lua ne connait pas la pause, le pont la
+-- rejoue en retenant le restant.
+Mock.Advance(5)
+equal(bridgeGroup:GetBar("dbm:Timer17086"):GetRemaining(), 20, "barre qui s'ecoule")
+Mock.FireDBM("DBM_TimerUpdate", "Timer17086", 5, 40)
+equal(bridgeGroup:GetBar("dbm:Timer17086"):GetRemaining(), 35, "recalage DBM applique")
+Mock.FireDBM("DBM_TimerPause", "Timer17086")
+equal(bridgeGroup:GetBar("dbm:Timer17086"), nil, "barre en pause retiree de l'affichage")
+Mock.Advance(10)
+Mock.FireDBM("DBM_TimerResume", "Timer17086")
+equal(bridgeGroup:GetBar("dbm:Timer17086"):GetRemaining(), 35,
+    "la pause n'a pas consomme de temps")
+Mock.FireDBM("DBM_TimerStop", "Timer17086")
+equal(bridgeGroup:GetBar("dbm:Timer17086"), nil, "barre arretee par DBM")
+equal(bridge:Count(), 0, "plus rien en memoire")
+
+-- Pull annonce par DBM : sur un client sans ENCOUNTER_START, c'est la seule
+-- source de chrono pour un boss dont MyBossSuite n'a pas la data.
+local beforePull = #Mock.addonMessages
+Mock.FireDBM("DBM_Pull", { id = "TestBoss", localization = { general = { name = "Boss de test" } } })
+equal(boss.engaged, "encounter:TestBoss", "engage generique ouvert par DBM")
+ok(boss.phaseFrame:IsShown(), "cadre de phase affiche")
+Mock.Advance(0.3)
+ok(boss.phaseFrame.title:GetText():find("Boss de test", 1, true) ~= nil,
+    "cadre : nom lu chez DBM")
+
+Mock.FireDBM("DBM_SetStage", nil, nil, 2)
+equal(boss.phase, 2, "stage DBM applique a la rencontre generique")
+equal(boss:PhaseLabel(), "Phase 2/2", "on n'annonce que les stages connus")
+equal(#Mock.addonMessages, beforePull,
+    "une phase lue chez DBM n'est pas rediffusee au groupe")
+
+-- Preseance : un boss connu qui agit reprend la main, et les barres du pont
+-- disparaissent au meme instant.
+Mock.FireDBM("DBM_TimerStart", "TimerPontue", "A effacer", 30)
+ok(bridgeGroup:GetBar("dbm:TimerPontue") ~= nil, "barre du pont pendant le generique")
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", BOSS_GUID, PLAYER_GUID, 12345)
+equal(boss.engaged, 10184, "montee en gamme vers la data")
+equal(bridgeGroup:GetBar("dbm:TimerPontue"), nil, "barres du pont effacees par la data")
+equal(bridge:Accepts(), false, "pont muet pendant une rencontre avec data")
+Mock.FireDBM("DBM_TimerStart", "TimerMuet", "Ignore", 30)
+equal(bridgeGroup:GetBar("dbm:TimerMuet"), nil, "rien ne s'affiche pendant une rencontre connue")
+ok(bridge:StatusLine():find("muet", 1, true) ~= nil, "/mbs boss dit pourquoi le pont se tait")
+
+-- Un kill annonce par DBM ne coupe pas une rencontre que le pont n'a pas ouverte.
+Mock.FireDBM("DBM_Kill", {})
+equal(boss.engaged, 10184, "DBM ne clot pas une rencontre du moteur maison")
+boss:Disengage("manual")
+equal(bridge.engagedBy, nil, "source du pont oubliee au disengage")
+
+-- ... mais il clot bien la sienne.
+Mock.FireDBM("DBM_Pull", { id = "TestBoss2", localization = { general = { name = "Autre" } } })
+equal(boss.engaged, "encounter:TestBoss2", "seconde rencontre generique")
+Mock.FireDBM("DBM_Kill", {})
+equal(boss.engaged, nil, "DBM clot la rencontre qu'il avait ouverte")
+
+-- BigWigs : meme pont, autre surface. Une barre BigWigs s'identifie par son
+-- TEXTE (StartBar donne cle + texte, StopBar ne donne que le texte).
+Mock.InstallBigWigs()
+Mock.FireEvent("ADDON_LOADED", "BigWigs")
+equal(bridge.hooked.bw, true, "BigWigs branche")
+Mock.FireBigWigs("BigWigs_StartBar", { displayName = "Boss BW" }, 18435, "Fireball Volley", 12, nil)
+local bwBar = bridgeGroup:GetBar("bw:Fireball Volley")
+ok(bwBar ~= nil, "barre reprise de BigWigs affichee")
+ok(bwBar.text:find("BW", 1, true) ~= nil, "la barre porte sa source")
+Mock.FireBigWigs("BigWigs_StopBar", { displayName = "Boss BW" }, "Fireball Volley")
+equal(bridgeGroup:GetBar("bw:Fireball Volley"), nil, "StopBar par le texte, comme BigWigs")
+
+Mock.FireBigWigs("BigWigs_StartBar", {}, 1, "A", 20, nil)
+Mock.FireBigWigs("BigWigs_StartBar", {}, 2, "B", 20, nil)
+equal(bridge:Count(), 2, "deux barres BigWigs")
+Mock.FireBigWigs("BigWigs_StopBars", {})
+equal(bridge:Count(), 0, "StopBars vide la source")
+
+-- Les deux sources cohabitent sans se marcher dessus.
+Mock.FireDBM("DBM_TimerStart", "Meme", "Meme nom", 20)
+Mock.FireBigWigs("BigWigs_StartBar", {}, "Meme", "Meme nom", 30, nil)
+equal(bridge:Count(), 2, "meme libelle, deux sources, deux barres")
+equal(bridgeGroup:GetBar("dbm:Meme").duration, 20, "barre DBM intacte")
+equal(bridgeGroup:GetBar("bw:Meme nom").duration, 30, "barre BigWigs intacte")
+Mock.FireBigWigs("BigWigs_StopBars", {})
+equal(bridge:Count(), 1, "arreter BigWigs ne touche pas DBM")
+
+-- /mbs boss pont off : le pont se tait ET efface ce qu'il avait mis a l'ecran.
+SlashCmdList["MYBOSSSUITE"]("boss pont off")
+equal(bridge:Count(), 0, "couper le pont efface ses barres")
+Mock.FireDBM("DBM_TimerStart", "ApresOff", "Rien", 20)
+equal(bridge:Count(), 0, "pont coupe : plus aucune barre")
+ok(bridge:StatusLine():find("off", 1, true) ~= nil, "statut : pont off")
+SlashCmdList["MYBOSSSUITE"]("boss pont on")
+Mock.FireDBM("DBM_TimerStart", "ApresOn", "Revenu", 20)
+equal(bridge:Count(), 1, "pont rallume : les barres reviennent")
+bridge:Clear()
+
+--------------------------------------------------------------------------------
+
+suite("Data extraite d'un boss mod")
+-- L'addon compagnon genere par tools/bossmod-extract depose sa data dans une
+-- table globale. Ce qui se teste ici, c'est la preseance : elle ne doit jamais
+-- passer devant la data du depot, et elle doit repartir proprement.
+local Extracted = ns.BossTimerExtracted
+equal(boss:CountData(), 5, "avant : la data du depot seule")
+ok(Extracted:StatusLine():find("absente", 1, true) ~= nil,
+    "sans compagnon installe, le statut le dit")
+
+_G.MyBossSuiteBossModData = {
+    flavor = ns.flavor,
+    generated = "202609092232",
+    data = {
+        -- Onyxia : le depot l'a deja, l'extraction ne doit pas la remplacer.
+        [10184] = { name = "Onyxia (DBM)", kind = "raid", timers = {
+            { trigger = "PULL", time = 99, spellId = 18435 },
+        } },
+        -- Un boss que le depot ne connait pas : celui-la doit entrer.
+        [77001] = { name = "Boss extrait", kind = "raid", zone = "Zone extraite",
+            flavors = { [ns.flavor] = true }, provisional = true, timers = {
+            { trigger = "PULL", time = 8, spellId = 18435, name = "Souffle" },
+            { trigger = "CAST", spellId = 18431, name = "Rugissement", repeatInterval = 30 },
+        } },
+    },
+    encounter = { [1084] = 10184, [4444] = 77001 },
+}
+
+equal(Extracted:Load(), 1, "une seule rencontre versee : l'autre est deja couverte")
+equal(Extracted.skipped, 1, "la rencontre du depot est comptee comme ignoree")
+equal(boss:CountData(), 6, "la data du depot n'a pas bouge, une entree s'est ajoutee")
+equal(ns.BossTimerData[10184].name, "Onyxia", "Onyxia reste celle du depot")
+equal(#ns.BossTimerData[10184].timers, 5, "... avec ses timers, pas ceux de DBM")
+equal(ns.BossTimerEncounter[1084], 10184, "l'alias du depot n'est pas ecrase")
+equal(ns.BossTimerEncounter[4444], 77001, "un alias inedit est ajoute")
+equal(ns.BossTimerData[77001].extracted, true, "l'entree versee est marquee comme extraite")
+ok(Extracted:StatusLine():find("1 rencontre", 1, true) ~= nil, "statut : ce qui est charge")
+
+-- La rencontre extraite est une rencontre comme une autre pour le moteur.
+boss:BuildAliases()
+equal(ns.BossTimerAlias[77001], 77001, "aliasee comme les autres")
+equal(boss:ValidateData(), retail and 3 or 0, "la data extraite passe la validation")
+
+Extracted:Unload()
+equal(boss:CountData(), 5, "Unload retire exactement ce qui avait ete verse")
+equal(ns.BossTimerData[10184] ~= nil, true, "... et rien de ce qui vient du depot")
+equal(ns.BossTimerEncounter[4444], nil, "l'alias extrait repart aussi")
+equal(ns.BossTimerEncounter[1084], 10184, "celui du depot reste")
+
+-- Data generee pour un autre client : refusee en bloc plutot qu'a moitie.
+_G.MyBossSuiteBossModData.flavor = "cata_qui_nexiste_pas"
+Mock.printed = {}
+equal(Extracted:Load(), 0, "data generee pour un autre flavor : rien n'est charge")
+ok(Mock.FindPrinted("ignoree"), "... et c'est dit, pas avale en silence")
+ok(Extracted:StatusLine():find("generee pour", 1, true) ~= nil, "statut : le desaccord de flavor")
+
+_G.MyBossSuiteBossModData = nil
+Extracted:Unload()
+boss:BuildAliases()
 
 --------------------------------------------------------------------------------
 

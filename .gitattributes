@@ -1,0 +1,16 @@
+# Fins de ligne normalisees en LF partout, y compris dans la copie de travail
+# Windows.
+#
+# Sans ca, un checkout Windows peut poser des CRLF que git normalise a nouveau
+# en LF au commit : `git status` reste propre, mais `tools/gen-toc.sh --check`
+# compare un rendu LF a un .toc CRLF et declare les six fichiers obsoletes.
+# Le meme piege attend n'importe quel diff textuel de la CI.
+* text=auto eol=lf
+
+# Binaires : jamais de conversion.
+*.png binary
+*.jpg binary
+*.ogg binary
+*.mp3 binary
+*.ttf binary
+*.blp binary
