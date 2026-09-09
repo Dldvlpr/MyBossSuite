@@ -71,6 +71,14 @@ local ALERT_ANCHOR   = "BossTimer_Display"
 
 local BAR_COLOR   = { 0.25, 0.55, 0.9 }
 local PHASE_COLOR = { 0.75, 0.35, 0.9 }
+local CAST_COLOR  = { 0.95, 0.75, 0.25 }
+
+-- Ecart tolere entre l'echeance estimee d'un timer et le cast reellement
+-- observe. En dessous, l'estimation etait bonne : la barre a deja fait son
+-- travail et annonce, on se contente de resynchroniser la suite. Au-dela, le
+-- boss a lance le sort ailleurs que la ou on l'attendait : c'est maintenant
+-- qu'il faut le montrer, pas a l'heure qu'on avait devinee.
+local RESYNC_TOLERANCE = 2
 
 local HEALTH_POLL_INTERVAL = 0.5
 local WIPE_POLL_INTERVAL   = 1
@@ -380,6 +388,50 @@ function M:StopBar(def)
     if group then group:StopBar(def.key) end
 end
 
+--------------------------------------------------------------------------------
+-- Barre d'incantation
+--------------------------------------------------------------------------------
+-- Tous les sorts ne tombent pas a heure fixe. Certains ont un cooldown interne
+-- et partent quand le boss le decide : la mediane des logs situe la fenetre,
+-- pas l'instant. Pour ceux-la, la seule information juste est le cast lui-meme.
+-- Il s'affiche donc quand le boss le lance, quel que soit le trigger du timer
+-- qui l'attendait — une barre qui compte l'incantation, et pas une echeance
+-- devinee.
+
+local function CastBarKey(def)
+    return def.key .. "_cast"
+end
+
+--- Duree d'incantation restante. Le client fait foi quand l'unite du boss est
+-- lisible ; a defaut on retombe sur le `castTime` releve dans les logs. Ni l'un
+-- ni l'autre : pas de barre, un sort instantane n'a pas d'incantation a montrer.
+function M:CastDuration(def)
+    local unit = self:ResolveBossUnit()
+    if unit then
+        local name, _, _, endTime, _, spellId = ns.GetCastInfo(unit)
+        if name and endTime and (spellId == nil or spellId == def.spellId) then
+            local remaining = endTime / 1000 - GetTime()
+            if remaining > 0 then return remaining end
+        end
+    end
+    return def.castTime
+end
+
+function M:ShowCastBar(def)
+    if def.castBar == false or def.bar == false then return end
+    local duration = self:CastDuration(def)
+    if not duration or duration <= 0 then return end
+    local group = self:GetGroup(ns:ResolveAnchorKey(def.spellId))
+    group:StartBar(CastBarKey(def), duration, TimerLabel(def), TimerIcon(def), {
+        color = def.color or CAST_COLOR,
+    })
+end
+
+function M:StopCastBar(def)
+    local group = Bars.groups[ns:ResolveAnchorKey(def.spellId)]
+    if group then group:StopBar(CastBarKey(def)) end
+end
+
 local function TimerPrefix(def)
     return "BossTimer_" .. def.key .. "_"
 end
@@ -393,11 +445,16 @@ end
 function M:CancelTimerDef(def)
     self:CancelTimerSchedule(def)
     self:StopBar(def)
+    self:StopCastBar(def)
 end
 
 --- Le moment ou la capacite tombe : on annonce, puis on reprogramme si le timer
 -- se repete.
-function M:FireTimer(def, subtitle)
+--- `observed` : le sort a ete vu partir dans le combat log, par opposition a
+-- une echeance estimee qui arrive a terme. La distinction n'a d'importance que
+-- pour un timing non deterministe, ou l'estimation ne vaut rien et
+-- l'observation vaut tout.
+function M:FireTimer(def, subtitle, observed)
     if def.once and def.fired then return end
     def.fired = true
 
@@ -409,8 +466,19 @@ function M:FireTimer(def, subtitle)
     -- qui compte le plus dans un combat, et la data n'a pas a la repeter.
     if announce == nil and def.trigger == "AURA" and def.on == "player" then
         announce = TimerLabel(def) .. " SUR TOI"
+    elseif announce == nil and def.variable and observed then
+        -- Timing non deterministe : la seule chose vraie qu'on puisse en dire,
+        -- c'est qu'il vient de partir. Le timer s'annonce donc de lui-meme au
+        -- cast, faute de pouvoir s'annoncer a l'avance.
+        announce = TimerLabel(def)
     end
-    if announce then
+
+    -- L'echeance estimee d'un timer `variable` est un reperage, pas une
+    -- prediction : la barre grisee suffit a l'exprimer. Annoncer ou sonner a
+    -- cet instant-la afficherait une certitude qu'on n'a pas.
+    if def.variable and not observed then
+        -- rien : la barre a expire, c'est tout ce qu'on avait a dire.
+    elseif announce then
         self:Announce(type(announce) == "string" and announce or TimerLabel(def), {
             subtitle = subtitle,
             icon     = TimerIcon(def),
@@ -442,7 +510,8 @@ function M:ScheduleNext(def, delay)
 
     local config = self:GetConfig() or EMPTY
 
-    if def.announce and def.warnBefore and delay > def.warnBefore and config.announce ~= false then
+    if def.announce and def.warnBefore and delay > def.warnBefore
+        and not def.variable and config.announce ~= false then
         Scheduler:Schedule(prefix .. "warn", delay - def.warnBefore, function()
             self:Announce(TimerLabel(def), {
                 subtitle = ("dans %ds"):format(def.warnBefore),
@@ -531,6 +600,7 @@ function M:BuildLookups(def, difficultyId)
         local timer = timers[i]
         timer.key     = timer.key or ("t" .. i)
         timer.fired   = false
+        timer.dueAt   = nil
         timer.isPhase = nil
         timer.skipped = not AppliesToDifficulty(timer, difficultyId)
         if not timer.skipped then
@@ -676,16 +746,29 @@ function M:Trigger(entry, reason, subtitle)
     if not TimerInPhase(entry, self.phase or 1) then return false end
     if entry.trigger == "CAST" or entry.trigger == "AURA"
         or entry.trigger == "DEATH" or entry.trigger == "EMOTE" or entry.trigger == "HEALTH" then
-        self:FireTimer(entry, subtitle)
+        self:FireTimer(entry, subtitle, true)
         return true
     end
-    if entry.repeatInterval then
-        -- Timer PULL/PHASE avec spellId : resynchro sur l'observation.
+
+    -- Timer PULL/PHASE avec spellId : l'observation prime toujours sur
+    -- l'estimation. Reste a savoir si elle a deja ete annoncee. Quand le cast
+    -- tombe la ou la barre l'attendait, elle a fait son travail et on se
+    -- contente de resynchroniser la suite ; quand il tombe ailleurs — ou que le
+    -- timing est declare non deterministe, auquel cas l'echeance ne promettait
+    -- rien — c'est ce cast-ci qu'il faut montrer.
+    local onSchedule = not entry.variable and entry.dueAt
+        and math.abs(entry.dueAt - GetTime()) <= RESYNC_TOLERANCE
+
+    if onSchedule then
+        if not entry.repeatInterval then return false end
         entry.fired = true
         self:ScheduleNext(entry, entry.repeatInterval)
         return true
     end
-    return false
+
+    self:CancelTimerSchedule(entry)
+    self:FireTimer(entry, subtitle, true)
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -1306,11 +1389,17 @@ end
 -- Un sort avec temps d'incantation genere START *et* SUCCESS : on n'en retient
 -- qu'un seul, sinon le timer se declenche deux fois.
 function M:OnBossCast(list, subevent)
+    local starting = (subevent == "SPELL_CAST_START")
     for i = 1, #list do
         local entry = list[i]
+        -- La barre d'incantation ne depend pas du trigger : le boss lance le
+        -- sort, ca se voit — meme quand le timer qui l'attendait comptait vers
+        -- une heure estimee, et meme quand il n'y avait rien a estimer.
+        if TimerInPhase(entry, self.phase or 1) then
+            if starting then self:ShowCastBar(entry) else self:StopCastBar(entry) end
+        end
         local wantStart = (entry.castStart == true)
-        if (wantStart and subevent == "SPELL_CAST_START")
-            or (not wantStart and subevent == "SPELL_CAST_SUCCESS") then
+        if (wantStart and starting) or (not wantStart and not starting) then
             self:Trigger(entry, "cast")
         end
     end
@@ -1472,16 +1561,27 @@ function M:TestBoss(npcId)
     local timers = def.timers or EMPTY
     for i = 1, #timers do
         local timer = timers[i]
+        local due
         if timer.trigger == "PULL" and timer.time then
-            self:ScheduleNext(timer, timer.time)
+            due = timer.time
+            self:ScheduleNext(timer, due)
         elseif timer.trigger == "PHASE" and timer.time then
             -- Programme a l'entree dans sa phase par SetPhase : rien a faire.
         else
             -- CAST, HEALTH, AURA... n'ont pas d'echeance connue hors combat :
             -- on les etale pour pouvoir juger du rendu et des positions.
-            local delay = timer.testTime or stagger
+            due = timer.testTime or stagger
             stagger = stagger + 6
-            self:ScheduleNext(timer, delay)
+            self:ScheduleNext(timer, due)
+        end
+        -- Une barre d'incantation ne nait que d'un cast observe : hors combat
+        -- il n'y en a pas. On la rejoue devant l'echeance du timer, sinon le
+        -- seul affichage d'un sort sans horaire serait absent du test.
+        if due and timer.castTime then
+            local at = math.max(0.1, due - timer.castTime)
+            Scheduler:Schedule("BossTimer_" .. timer.key .. "_testcast", at, function()
+                self:ShowCastBar(timer)
+            end)
         end
     end
 

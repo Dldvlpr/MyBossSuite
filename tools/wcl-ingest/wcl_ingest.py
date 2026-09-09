@@ -11,6 +11,13 @@ aux pulls rates et aux outliers). Si l'ecart-type des deltas est eleve, le timer
 est marque `variable = true` : la barre s'affichera comme incertaine plutot que
 de mentir sur une precision qu'on n'a pas.
 
+Quand ni l'heure du premier cast ni la cadence ne se laissent mesurer, il n'y a
+pas d'horaire du tout : le sort est disponible et le boss le lance quand il le
+decide. Ecrire la mediane afficherait une barre qui compte vers un instant
+invente. Un tel sort sort donc en `trigger = "CAST"` — il ne se prevoit pas, il
+se montre au moment ou le boss le lance. L'ecart entre `begincast` et `cast`
+donne `castTime`, la duree d'incantation, dont l'addon fait une barre.
+
 Un fichier de data n'est pas qu'un releve. La structure — phases, seuils de vie,
 libelles, `warnBefore` — s'ecrit a la main et ne se mesure pas. Une regeneration
 FUSIONNE donc avec le fichier existant : seuls les champs mesures (`time`,
@@ -87,6 +94,11 @@ PHASE_INTERVAL_STDEV = 1.5
 # suspectee dans le commentaire. En dessous, on dit juste qu'il y a un doute.
 PHASE_HINT_SHARE = 0.6
 
+# Ecart maximal retenu entre un `begincast` et le `cast` qui le suit pour y voir
+# un temps d'incantation. Au-dela, ce n'est plus une incantation qu'on mesure,
+# c'est un debut de sort perdu et un lancer suivant sans rapport.
+MAX_CAST_TIME = 30.0
+
 
 def fetch_casts(token: str, code: str, fight_id: int, start: float):
     return fetch_events(token, code, fight_id, start, "Casts", "Enemies")
@@ -125,8 +137,29 @@ def deltas(times):
     return [round(b - a, 2) for a, b in zip(times, times[1:]) if 1.0 < (b - a) < 600.0]
 
 
+def cast_times(starts, casts):
+    """Duree d'incantation : ecart entre chaque `begincast` et le `cast` qui suit.
+
+    C'est la seule chose que le log dise du temps que le boss met a lancer son
+    sort, et c'est ce qui permet a l'addon d'afficher une barre d'incantation
+    juste quand le client ne sait pas lire l'unite du boss (Classic Era, boss
+    hors de portee des frames surveillees).
+    """
+    out, index = [], 0
+    for start in sorted(starts):
+        while index < len(casts) and casts[index] < start:
+            index += 1
+        if index >= len(casts):
+            break
+        gap = casts[index] - start
+        if 0 < gap <= MAX_CAST_TIME:
+            out.append(round(gap, 2))
+        index += 1
+    return out
+
+
 def new_stat():
-    return {"firsts": [], "intervals": [],
+    return {"firsts": [], "intervals": [], "castTimes": [],
             "phases": defaultdict(lambda: {"firsts": [], "intervals": []})}
 
 
@@ -155,9 +188,11 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
 
         pull = float(fight["startTime"])
         by_ability = defaultdict(list)
+        begun = defaultdict(list)
 
         for event in events:
-            if event.get("type") not in ("cast", "begincast"):
+            kind = event.get("type")
+            if kind not in ("cast", "begincast"):
                 continue
             source = actors.get(event.get("sourceID"))
             if source is None:
@@ -167,7 +202,22 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
             ability = event.get("abilityGameID")
             if ability is None:
                 continue
-            by_ability[ability].append((float(event["timestamp"]) - pull) / 1000.0)
+            when = (float(event["timestamp"]) - pull) / 1000.0
+            (begun if kind == "begincast" else by_ability)[ability].append(when)
+
+        # Un sort a temps d'incantation produit `begincast` PUIS `cast` : deux
+        # evenements pour un seul lancer. Verses dans le meme tas, l'ecart entre
+        # les deux passe pour une cadence — une "cadence" de 2.0 s a 0.01 s
+        # d'ecart-type, qui n'est que la duree du sort, et qui fait ecrire un
+        # `repeatInterval` parfaitement regulier et parfaitement faux. On les
+        # separe donc : le `cast` porte le rythme, l'ecart au `begincast` porte
+        # la duree d'incantation.
+        for ability, starts in begun.items():
+            starts.sort()
+            if not by_ability.get(ability):
+                # Incantation jamais menee a terme dans ce log (interrompue, ou
+                # le boss meurt dessus) : le debut vaut mieux que rien.
+                by_ability[ability] = list(starts)
 
         if not by_ability:
             print(f"  ! {code}:{fight_id} : aucun cast ennemi retenu", file=sys.stderr)
@@ -179,6 +229,7 @@ def collect(token: str, reports, npc_id: int | None, verbose: bool,
             entry = stats[ability]
             entry["firsts"].append(times[0])
             entry["intervals"].extend(deltas(times))
+            entry["castTimes"].extend(cast_times(begun.get(ability, []), times))
 
         bounds = {}
         if want_phases:
@@ -296,6 +347,8 @@ def summarise(stats, min_reports: int):
             continue
         row = measure(firsts, entry["intervals"])
         row["spellId"] = ability
+        cast = entry.get("castTimes") or []
+        row["castTime"] = round(statistics.median(cast), 1) if cast else None
 
         row["phases"] = {
             index: measure(data["firsts"], data["intervals"])
@@ -315,6 +368,14 @@ def summarise(stats, min_reports: int):
         row["variable"] = (not row["phaseGated"]
                            and max(row["timeStdev"], row["intervalStdev"]) > VARIABLE_STDEV)
 
+        # Ni l'heure du premier cast ni la cadence ne se laissent prevoir : le
+        # sort est disponible, le boss le lance quand il veut. Il n'y a donc pas
+        # d'horaire a afficher — seulement un cast a montrer au moment ou il
+        # part. Un tel sort se declare `CAST` : le timer reagit au combat log au
+        # lieu de compter vers une mediane qui ne veut rien dire.
+        row["reactive"] = (not row["phaseGated"]
+                           and row["timeStdev"] > VARIABLE_STDEV and not tight_cadence)
+
         rows.append(row)
     rows.sort(key=lambda row: row["time"])
     return rows
@@ -326,7 +387,7 @@ def summarise(stats, min_reports: int):
 # Ce que les logs mesurent, et donc ce qu'une regeneration a le droit de
 # reecrire. Tout le reste d'un timer — trigger, phase, setPhase, seuil, libelle,
 # warnBefore — est ecrit a la main : c'est de la structure, pas une mesure.
-MEASURED_FIELDS = ("time", "repeatInterval", "variable")
+MEASURED_FIELDS = ("time", "repeatInterval", "variable", "castTime")
 
 # Triggers pour lesquels un `time` veut dire quelque chose. Ailleurs (CAST,
 # AURA, EMOTE, DEATH) le champ est mort et doit disparaitre.
@@ -338,8 +399,8 @@ TIME_TRIGGERS = ("PULL", "PHASE")
 FIELD_ORDER = (
     "trigger", "time", "phase", "phases", "spellId", "castStart",
     "threshold", "pattern", "npcId", "on", "event",
-    "name", "difficulties", "repeatInterval", "warnBefore", "once",
-    "announce", "countdown", "flash", "bar", "variable",
+    "name", "difficulties", "repeatInterval", "castTime", "warnBefore", "once",
+    "announce", "countdown", "flash", "bar", "castBar", "variable",
     "testTime", "color", "icon", "key", "provisional",
 )
 
@@ -498,6 +559,15 @@ def merge_timer(existing: dict, row):
         merged["variable"] = True
     else:
         merged.pop("variable", None)
+
+    # Duree d'incantation : mesuree sur l'ensemble du combat, elle ne depend
+    # pas de la phase. Un sort devenu instantane (ou dont aucun `begincast`
+    # n'est visible dans ce passage) perd le champ plutot que de garder une
+    # duree perimee.
+    if row.get("castTime"):
+        merged["castTime"] = row["castTime"]
+    else:
+        merged.pop("castTime", None)
     return merged
 
 
@@ -514,9 +584,29 @@ def is_variable(source) -> bool:
 
 
 def new_timer(row):
+    """Timer d'un sort jamais vu jusqu'ici.
+
+    Le trigger se choisit sur ce que la mesure permet d'affirmer. Quand rien
+    n'est previsible — ni l'heure du premier cast ni la cadence — ecrire un
+    `PULL` avec la mediane afficherait une barre qui compte vers une heure
+    inventee. On declare alors le timer en `CAST` : il n'annonce rien a
+    l'avance, il montre le sort au moment ou le boss le lance.
+    """
+    if row.get("reactive"):
+        timer = {"trigger": "CAST", "spellId": row["spellId"], "bar": True}
+        if row.get("castTime"):
+            # Le boss met du temps a le lancer : `castStart` fait partir la
+            # barre au debut de l'incantation, ou elle sert encore a quelque
+            # chose, plutot qu'a l'impact ou il est trop tard.
+            timer["castStart"] = True
+            timer["castTime"] = row["castTime"]
+        return timer
+
     timer = {"trigger": "PULL", "time": row["time"], "spellId": row["spellId"], "bar": True}
     if row["repeatInterval"]:
         timer["repeatInterval"] = row["repeatInterval"]
+    if row.get("castTime"):
+        timer["castTime"] = row["castTime"]
     if row["variable"]:
         timer["variable"] = True
     if row.get("phaseGated"):
@@ -609,6 +699,16 @@ def render_timer(timer, row, merged_existing: bool):
                 "        -- TODO phase ? premier cast disperse (sigma %ss) mais cadence"
                 " serree (sigma %ss)%s" % (row["timeStdev"], row["intervalStdev"], hint)
             )
+        if row.get("reactive") and origin == "pull" and timer.get("trigger") in TIME_TRIGGERS:
+            # Le timer compte vers une heure que la mesure ne soutient pas. Le
+            # generateur ne rebascule pas un trigger ecrit a la main — c'est de
+            # la structure — mais il dit ce que la mesure permet d'affirmer.
+            lines.append(
+                "        -- TODO cast ? aucun horaire dans les logs (sigma %ss depuis le"
+                " pull, cadence %s) : ce sort se montre au cast, il ne se prevoit pas"
+                % (row["timeStdev"],
+                   ("sigma %ss" % row["intervalStdev"]) if row["repeatInterval"] else "aucune")
+            )
     elif merged_existing:
         what = ("spell %d absent des logs de ce passage" % timer["spellId"]
                 if timer.get("spellId") else "entree ecrite a la main")
@@ -632,7 +732,13 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
         "-- GENERE PAR tools/wcl-ingest/wcl_ingest.py — mediane des deltas mesures.",
         "-- Rencontre WCL : %s | logs retenus : %d" % (encounter_name or "?", used_reports),
         "-- Les timers marques `variable` ont un ecart-type eleve : mecanique non",
-        "-- deterministe, la barre s'affiche comme incertaine.",
+        "-- deterministe, la barre s'affiche comme incertaine et n'annonce rien a son",
+        "-- echeance — c'est le cast observe qui annonce.",
+        "--",
+        "-- Un sort dont ni l'heure ni la cadence ne se laissent mesurer n'a pas",
+        "-- d'horaire a afficher : il sort en `trigger = \"CAST\"`, montre au moment ou",
+        "-- le boss le lance. `castTime` est la duree d'incantation relevee, dont",
+        "-- l'addon fait une barre quand le client ne sait pas lire l'unite du boss.",
         "--",
         "-- Un timer PHASE compte depuis l'entree dans sa phase : il n'est mesure que",
         "-- si cette borne a pu etre situee dans le log (seuil de vie rejoue, cast",
@@ -641,10 +747,10 @@ def render_lua(args, header, timers, encounter_name: str, used_reports: int) -> 
         "-- `-- TODO phase ?` marque un sort dont le premier cast se disperse alors que",
         "-- sa cadence est serree : la signature d'un sort qui attend une phase.",
         "--",
-        "-- Regeneration : seuls `repeatInterval`, `variable` et le `time` mesure sont",
-        "-- reecrits. Phases, seuils, libelles, annonces et tout autre champ ecrit a la",
-        "-- main sont conserves : editer ce fichier est sur, relancer l'ingestion ne les",
-        "-- effacera pas.",
+        "-- Regeneration : seuls `repeatInterval`, `castTime`, `variable` et le `time`",
+        "-- mesure sont reecrits. Phases, seuils, libelles, annonces et tout autre champ",
+        "-- ecrit a la main sont conserves : editer ce fichier est sur, relancer",
+        "-- l'ingestion ne les effacera pas.",
         "",
         "local _, ns = ...",
         "",
@@ -826,10 +932,14 @@ def main(argv=None) -> int:
     print(f"{len(rows)} sort(s) retenu(s) sur {used} log(s) :")
     for row in rows:
         flag = " [variable]" if row["variable"] else ""
+        if row.get("reactive"):
+            flag = " [au cast]"
         if row["phaseGated"]:
             hint = f" {row['phaseHint']} ?" if row["phaseHint"] else ""
             flag = f" [TODO phase{hint}]"
         interval = f", toutes les {row['repeatInterval']}s" if row["repeatInterval"] else ""
+        if row.get("castTime"):
+            interval += f", incantation {row['castTime']}s"
         measured = "".join(f", phase {index} +{data['time']}s"
                            for index, data in sorted(row["phases"].items()) if index >= 2)
         print(f"  spell {row['spellId']:>7} : pull +{row['time']}s{interval}{measured}"

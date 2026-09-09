@@ -353,7 +353,7 @@ ok(playerBar.endTime > mainHandEnd, "SWING_MISSED main droite : barre relancee")
 
 suite("BossTimer")
 local boss = ns:GetModule("bossTimer")
-equal(boss:CountData(), 5, "data chargee (Onyxia, Kazzak, Herod + 2 fixtures)")
+equal(boss:CountData(), 6, "data chargee (Onyxia, Kazzak, Herod + 3 fixtures)")
 equal(ns.BossTimerAlias[99002], 99001, "npcId secondaire aliase vers la rencontre")
 if retail then
     -- La data vanilla chargee sur un client retail doit etre signalee.
@@ -747,6 +747,64 @@ if retail then
     Mock.FireEvent("ENCOUNTER_END", 4243, "Conseil des Tests", 1, 40, 1)
     equal(boss.engaged, nil, "fin de rencontre")
 end
+
+--------------------------------------------------------------------------------
+
+suite("BossTimer - sorts sans horaire")
+-- Tous les sorts ne tombent pas a heure fixe : certains sont disponibles et
+-- partent quand le boss le decide. Compter vers une mediane afficherait une
+-- precision qu'on n'a pas ; ce qui est vrai, c'est le cast, et c'est lui qui
+-- doit se voir au moment ou le boss le lance.
+Mock.instance = { name = "Terrain d'essai", type = "party", difficulty = 1, instanceId = 900 }
+local CASTER_GUID = "Creature-0-1-2-3-99200-000006"
+
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", CASTER_GUID, PLAYER_GUID, 55555)
+equal(boss.engaged, 99200, "boss engage")
+equal(generic:GetBar("t1"), nil, "un sort sans horaire n'affiche rien avant d'etre lance")
+
+-- Le boss commence a incanter : la barre part, et dure ce que dure le sort.
+Mock.FireCombatLog("SPELL_CAST_START", CASTER_GUID, PLAYER_GUID, 99210)
+ok(generic:GetBar("t1_cast") ~= nil, "barre d'incantation au debut du cast")
+equal(generic:GetBar("t1_cast").duration, 5, "duree = `castTime` de la data")
+equal(CountFired("Incantation"), 1, "et le timer se declenche au cast")
+
+-- Le sort part : l'incantation est finie, la barre n'a plus rien a montrer.
+Mock.Advance(1)
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", CASTER_GUID, PLAYER_GUID, 99210)
+equal(generic:GetBar("t1_cast"), nil, "barre coupee quand le sort part")
+equal(CountFired("Incantation"), 1, "et pas de second declenchement sur SUCCESS")
+
+-- Quand le client sait lire l'unite du boss, c'est lui qui fait foi : la data
+-- n'est qu'un filet pour les clients qui ne repondent pas.
+Mock.units.target = { guid = CASTER_GUID, name = "Incantateur des Tests",
+                      health = 100, healthMax = 100 }
+Mock.SetCast("target", 99210)
+Mock.FireCombatLog("SPELL_CAST_START", CASTER_GUID, PLAYER_GUID, 99210)
+equal(generic:GetBar("t1_cast").duration, 2, "duree lue sur l'unite du boss")
+Mock.SetCast("target", nil)
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", CASTER_GUID, PLAYER_GUID, 99210)
+
+-- Un timing `variable` : la barre reste un reperage. Son echeance n'annonce
+-- rien — annoncer la, ce serait affirmer une heure qu'on ne connait pas.
+Mock.printed = {}
+bossDisplay:Hide()
+local before = #firedTimers
+Mock.Advance(20)
+equal(bossDisplay:IsShown(), false, "echeance d'un timing variable : aucune annonce")
+equal(#firedTimers, before + 1, "le timer a bien atteint son echeance")
+
+-- ... mais le cast observe, lui, s'annonce : c'est la seule chose vraie qu'on
+-- puisse dire d'un sort non deterministe.
+Mock.FireCombatLog("SPELL_CAST_SUCCESS", CASTER_GUID, PLAYER_GUID, 99211)
+ok(bossDisplay:IsShown(), "cast observe d'un sort variable : annonce")
+equal(bossDisplay.text:GetText(), "Aleatoire", "... sous son propre libelle")
+equal(CountFired("Aleatoire"), 2, "et le timer se declenche sur l'observation")
+
+Mock.instance = { name = "Azshara", type = "none", difficulty = 0, instanceId = 0 }
+Mock.FireEvent("ZONE_CHANGED_NEW_AREA")
+Mock.units.target = nil
+equal(boss.engaged, nil, "disengage")
+equal(generic:Count(), 0, "barres nettoyees, incantation comprise")
 
 --------------------------------------------------------------------------------
 
@@ -1152,6 +1210,15 @@ equal(boss.phase, 1, "test : phase 1")
 ok(boss.phaseFrame:IsShown(), "test : cadre de phase affiche")
 Mock.Advance(21)
 equal(boss.phase, 2, "test : la phase 2 est rejouee a son testTime")
+ns.Config:StopTest()
+
+-- Hors combat il n'y a pas de cast a observer : la barre d'incantation doit
+-- quand meme etre rejouee, sinon le seul affichage d'un sort sans horaire
+-- manquerait au test.
+boss:TestBoss(99200)
+Mock.Advance(1.2)
+ok(generic:GetBar("t1_cast") ~= nil, "test : la barre d'incantation est rejouee")
+equal(generic:GetBar("t1_cast").duration, 5, "test : sur la duree de `castTime`")
 ns.Config:StopTest()
 equal(boss.testing, false, "test boss arrete")
 equal(boss.phase, nil, "test : phase effacee")

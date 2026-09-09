@@ -114,14 +114,46 @@ phase démarrent, et le cadre boss/phase/chrono se met à jour.
 | `countdown` | non | `n` : compte à rebours texte n…1 avant l'échéance |
 | `flash` | non | flash plein écran avec l'annonce |
 | `bar` | non | `false` pour un timer sans barre |
-| `variable` | non | timing non déterministe : barre grisée et préfixée `~` |
+| `variable` | non | timing non déterministe : barre grisée et préfixée `~`, échéance muette, annonce au cast observé |
 | `castStart` | non | déclencher sur `SPELL_CAST_START` au lieu de `SPELL_CAST_SUCCESS` |
+| `castTime` | non | durée d'incantation, en secondes : barre affichée pendant que le boss lance le sort |
+| `castBar` | non | `false` pour ne pas afficher la barre d'incantation |
 | `testTime` | non | délai utilisé par `/mbs test boss <npcId>` pour les triggers sans échéance connue |
 | `color` | non | `{ r, g, b }` |
 
 Un timer `PULL` restreint à des phases n'est programmé à l'engage que s'il est
 actif en phase 1 ; pour un timer relatif à l'entrée dans une phase, utiliser
 `PHASE`.
+
+## Les sorts qui n'ont pas d'horaire
+
+Tous les sorts ne tombent pas à heure fixe. Beaucoup ont un cooldown interne :
+le sort *redevient disponible* à intervalle régulier, mais le boss le lance
+quand il le décide — parfois tout de suite, parfois trois GCD plus tard, parfois
+jamais parce qu'il était occupé ailleurs. Les logs mesurent alors une fenêtre,
+pas un instant, et une barre qui compte vers la médiane affiche une précision
+qui n'existe pas.
+
+Ce qui reste vrai dans ce cas, c'est le cast lui-même. Le moteur le montre donc
+au moment où le boss le lance, et de trois façons qui se combinent :
+
+- **`trigger = "CAST"`** — le timer n'annonce rien à l'avance, il réagit au
+  combat log. C'est ce que l'ingestion écrit pour un sort dont ni l'heure du
+  premier cast ni la cadence ne se laissent mesurer.
+- **La barre d'incantation** — dès `SPELL_CAST_START`, une barre court pendant
+  que le boss incante, **quel que soit le trigger du timer**. Sa durée vient du
+  client quand l'unité du boss est lisible, sinon du `castTime` relevé dans les
+  logs. Un sort instantané n'en a pas : il n'y a rien à faire courir.
+- **`variable = true`** — la barre reste grisée et préfixée `~`, mais son
+  échéance ne dit plus rien : ni son, ni annonce, ni pré-alerte. Annoncer là,
+  ce serait affirmer une heure qu'on ne connaît pas. C'est le cast observé qui
+  annonce, sous le libellé du timer.
+
+Un cast observé prime toujours sur l'estimation. Quand il tombe là où la barre
+l'attendait (à 2 s près), elle a fait son travail : on se contente de
+resynchroniser la suite. Quand il tombe ailleurs — ou que le timer est
+`variable`, auquel cas l'échéance ne promettait rien — c'est ce cast-ci qui
+s'affiche.
 
 ## Régénération
 
@@ -130,7 +162,7 @@ de l'écraser :
 
 | | |
 |---|---|
-| Réécrits à chaque passage | `repeatInterval`, `variable`, et le `time` mesuré : celui des timers `PULL`, et celui des timers `PHASE` dont la borne a pu être située dans le log |
+| Réécrits à chaque passage | `repeatInterval`, `castTime`, `variable`, et le `time` mesuré : celui des timers `PULL`, et celui des timers `PHASE` dont la borne a pu être située dans le log |
 | Conservés | tout le reste : le tableau `phases`, `trigger`, `phase`, `threshold`, `name`, `announce`, `flash`, `on`, `warnBefore`, `once`, `testTime`, `color`, `kind`, `zone`, `instanceId`… |
 | Conservés tels quels | les timers dont le sort est absent des logs de ce passage, signalés par un commentaire `-- conserve :` |
 | Ajoutés en fin de liste | les sorts jamais vus jusqu'ici, là où on les remarque |
@@ -170,6 +202,16 @@ Ce qu'il faut savoir :
   le commentaire donne les deux écarts-types et, si une phase concentre les
   observations, laquelle. Le générateur signale — convertir en `PHASE` demande
   de savoir *quelle* phase, ce qu'un delta depuis le pull ne dit pas.
+- **`-- TODO cast ?`** marque l'inverse : un sort dont *rien* ne se mesure, ni
+  l'heure du premier cast ni la cadence. Un timer inédit sort directement en
+  `trigger = "CAST"` ; sur un timer déjà écrit à la main, le générateur se
+  contente du commentaire, parce que le trigger est de la structure et qu'il
+  n'y touche pas.
+- **`begincast` et `cast` sont deux événements pour un seul lancer.** L'écart
+  entre les deux est la durée d'incantation, pas une cadence : versé dans le
+  tas des intervalles, il écrivait des `repeatInterval` de 2,0 s à 0,01 s
+  d'écart-type — parfaitement réguliers et parfaitement faux. L'ingestion les
+  sépare : le `cast` porte le rythme, l'écart au `begincast` devient `castTime`.
 - Un timer `PULL` qui reçoit une mesure perd son `provisional` : il n'est plus
   provisoire, il est mesuré.
 - Un timer basculé en `CAST`, `AURA`, `EMOTE` ou `DEATH` ne garde pas de

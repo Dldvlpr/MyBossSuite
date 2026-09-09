@@ -205,5 +205,64 @@ finally:
     tmp.unlink()
 
 
+# ----------------------------------------------------------------------------
+suite("Incantation et sorts sans horaire")
+
+# `begincast` et `cast` sont deux evenements pour un seul lancer. Melanges, ils
+# font passer la duree du sort pour une cadence : c'est ce qui ecrivait des
+# `repeatInterval` de 2.0 s a 0.01 s d'ecart-type — reguliers, et faux.
+equal(wi.cast_times([10.0, 20.0], [12.0, 22.0]), [2.0, 2.0],
+      "la duree d'incantation se lit entre begincast et le cast qui suit")
+equal(wi.cast_times([10.0], [8.0, 12.5]), [2.5],
+      "un cast anterieur au begincast ne compte pas")
+equal(wi.cast_times([10.0], [10.0 + wi.MAX_CAST_TIME + 1]), [],
+      "un ecart trop grand n'est pas une incantation")
+equal(wi.cast_times([10.0], []), [], "un begincast sans cast ne mesure rien")
+
+# Un sort qui part quand le boss le decide n'a pas d'heure a afficher. Ecrire
+# la mediane produirait une barre qui compte vers un instant invente ; le seul
+# fait mesurable, c'est le cast lui-meme.
+stats = {
+    # premier cast disperse, cadence dispersee : rien de previsible.
+    701: {"firsts": [5.0, 25.0, 45.0], "intervals": [30.0, 12.0, 55.0],
+          "castTimes": [2.0, 2.1, 2.0], "phases": {}},
+    # premier cast serre, cadence serree : un horaire, lui, existe.
+    702: {"firsts": [10.0, 10.2, 9.9], "intervals": [20.0, 20.1, 19.9],
+          "castTimes": [], "phases": {}},
+}
+rows_by_spell = {r["spellId"]: r for r in wi.summarise(stats, 2)}
+
+reactive = rows_by_spell[701]
+equal(reactive["reactive"], True, "ni heure ni cadence : le sort est reactif")
+equal(reactive["castTime"], 2.0, "sa duree d'incantation est la mediane des mesures")
+timer = wi.new_timer(reactive)
+equal(timer["trigger"], "CAST", "un sort sans horaire sort en trigger CAST")
+equal(timer["castStart"], True, "la barre part au debut de l'incantation")
+equal(timer["castTime"], 2.0, "et dure ce que dure l'incantation")
+ok("time" not in timer, "aucun `time` invente pour un sort sans horaire")
+
+steady = rows_by_spell[702]
+equal(steady["reactive"], False, "un sort regulier garde son horaire")
+equal(steady["castTime"], None, "sort instantane : pas de duree d'incantation")
+steady_timer = wi.new_timer(steady)
+equal(steady_timer["trigger"], "PULL", "et reste un timer PULL")
+ok("castTime" not in steady_timer, "sans incantation mesuree, pas de champ")
+
+# Le trigger d'un timer existant est de la structure ecrite a la main : le
+# generateur le signale, il ne le rebascule pas.
+hand_written = {"trigger": "PULL", "time": 5, "spellId": 701, "bar": True}
+kept_trigger = wi.merge_timer(dict(hand_written), reactive)
+equal(kept_trigger["trigger"], "PULL", "un trigger ecrit a la main n'est pas rebascule")
+equal(kept_trigger["castTime"], 2.0, "mais il recoit la duree d'incantation mesuree")
+equal(kept_trigger["variable"], True, "et reste marque non deterministe")
+signalled = "\n".join(wi.render_timer(kept_trigger, reactive, False))
+ok("TODO cast ?" in signalled, "le generateur signale qu'il n'y a pas d'horaire")
+
+# Une incantation qui disparait ne doit pas laisser une duree perimee en place.
+dropped = wi.merge_timer({"trigger": "PULL", "time": 5, "spellId": 702, "castTime": 9},
+                         steady)
+ok("castTime" not in dropped, "plus d'incantation mesuree : le champ disparait")
+
+
 print(f"\n{passed} ok, {failed} echec(s)")
 sys.exit(0 if failed == 0 else 1)
