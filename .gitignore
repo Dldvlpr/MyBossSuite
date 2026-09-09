@@ -6,3 +6,7 @@ __pycache__/
 .env
 # Jeton utilisateur OAuth (contient un refresh_token).
 .wcl-token.json
+
+# Data extraite des boss mods installes localement : jamais versionnee.
+# Voir tools/bossmod-extract/ — la sortie va dans le dossier AddOns du client.
+MyBossSuite_BossModData/

@@ -35,6 +35,9 @@ local M = ns:NewModule("bossTimer", {
     phaseFrame = true,    -- cadre boss / phase / chrono
     summary    = true,    -- resume en fin de combat (kill, wipe, duree)
     sync       = true,    -- synchronisation pull / phases / kill avec le groupe
+    -- Barres reprises de DBM/BigWigs, la ou on n'a pas de data. Voir Bridge.lua :
+    -- lecture des callbacks en jeu, jamais d'extraction dans le depot.
+    bridge     = true,
     alert = Alerts.MakeDefaults({
         text      = "BOSS",
         color     = { 1, 0.6, 0.2 },
@@ -1507,6 +1510,11 @@ function M:TestBoss(npcId)
         :format(def.name or "?", npcId, #timers, #phases))
 end
 
+--- Fin du mode test. Ecoute posee au chargement du fichier, pas dans OnEnable :
+-- le cadre de phase est enregistre comme ancre des OnInitialize, donc `/mbs
+-- test` l'affiche meme module eteint. Cable dans OnEnable, `/mbs test stop`
+-- n'aurait alors rien pour l'effacer, et le faux combat resterait a l'ecran
+-- jusqu'au /reload.
 function M:StopTestBoss()
     if self.phaseFrame and self.phaseFrame.testing then
         self.phaseFrame.testing = nil
@@ -1521,7 +1529,10 @@ function M:StopTestBoss()
     self.def, self.phase, self.kind = nil, nil, nil
     self.castTriggers, self.healthTriggers = nil, nil
     self.auraTriggers, self.deathTriggers, self.emoteTriggers = nil, nil, nil
+    self.npcSet, self.alive = nil, nil
 end
+
+ns.EventBus:On("TEST_STOPPED", function() M:StopTestBoss() end)
 
 --------------------------------------------------------------------------------
 -- Validation de la data
@@ -1687,6 +1698,12 @@ function M:StatusLines()
     lines[#lines + 1] = ("fin de combat : %s"):format(
         ns.has.encounterProgress and "IsEncounterInProgress + combat du groupe"
             or "combat du groupe (delai de grace)")
+    if ns.BossTimerExtracted then
+        lines[#lines + 1] = ns.BossTimerExtracted:StatusLine()
+    end
+    if ns.BossTimerBridge then
+        lines[#lines + 1] = ns.BossTimerBridge:StatusLine()
+    end
     return lines
 end
 
@@ -1698,6 +1715,9 @@ function M:OnInitialize()
     self:GetGroup(GENERIC_ANCHOR)
     self:CreateSavedOverrideGroups()
     self:GetPhaseFrame()
+    -- L'ancre du pont existe des l'initialisation : elle doit etre deplacable en
+    -- mode unlock sans attendre qu'un boss mod parle.
+    if ns.BossTimerBridge then ns.BossTimerBridge:GetGroup() end
 
     Alerts:Register(ALERT_KEY, {
         anchorKey    = ALERT_ANCHOR,
@@ -1714,6 +1734,10 @@ end
 
 function M:OnEnable()
     playerGUID = UnitGUID("player")
+    -- Avant BuildAliases et ValidateData : la data extraite localement entre
+    -- dans BossTimerData comme n'importe quelle autre, et doit donc etre aliasee
+    -- et validee avec le reste.
+    if ns.BossTimerExtracted then ns.BossTimerExtracted:Load() end
     self:BuildAliases()
     -- Les ancres dediees du profil courant (un changement de profil redemarre
     -- le module sans repasser par OnInitialize).
@@ -1734,13 +1758,14 @@ function M:OnEnable()
     self:RegisterEvent("GROUP_ROSTER_UPDATE")
     self:RegisterEvent("PARTY_MEMBERS_CHANGED", "GROUP_ROSTER_UPDATE")
     self:RegisterEvent("RAID_ROSTER_UPDATE", "GROUP_ROSTER_UPDATE")
-    self:RegisterMessage("TEST_STOPPED", function() self:StopTestBoss() end)
 
     Comm:On("PULL", function(...) self:OnSyncPull(...) end)
     Comm:On("PHASE", function(...) self:OnSyncPhase(...) end)
     Comm:On("END", function(...) self:OnSyncEnd(...) end)
     Comm:On("REQ", function() self:OnSyncRequest() end)
     self:Schedule("syncRequest", 2, function() self:RequestState() end)
+
+    if ns.BossTimerBridge then ns.BossTimerBridge:Enable() end
 
     local problems = self:ValidateData()
     if problems > 0 then
@@ -1750,6 +1775,8 @@ function M:OnEnable()
 end
 
 function M:OnDisable()
+    if ns.BossTimerBridge then ns.BossTimerBridge:Disable() end
+    if ns.BossTimerExtracted then ns.BossTimerExtracted:Unload() end
     self:Disengage("disable")
     self:StopTestBoss()
     Comm:Off("PULL")

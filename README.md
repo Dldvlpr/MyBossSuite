@@ -19,6 +19,8 @@ La fiche de route complète est dans [`docs/ROADMAP.md`](docs/ROADMAP.md).
 | 3a | `tools/wcl-ingest` (WarcraftLogs), bornes de phase comprises | outil écrit, **data à générer** |
 | 3b | `tools/wa-extract` (WeakAuras perso) | outil écrit |
 | 3c | Extraction depuis DBM/BigWigs | **fermée** — les deux sont *All Rights Reserved*, pas GPL |
+| 3d | `Modules/BossTimer/Bridge.lua` — pont runtime DBM/BigWigs | fait |
+| 3e | `tools/bossmod-extract` — data extraite de DBM/BigWigs installés (**locale, non versionnée**) | fait |
 | 4 | Module Swing Timer | fait |
 | 5 | Module CD Tracker | fait, sur les 6 flavors — voir la note ci-dessous |
 | 6 | Module Interrupt Rotation | fait — repose sur la phase 5 |
@@ -44,6 +46,34 @@ chrono, annonces plein écran et compte à rebours, distinction kill / wipe /
 reset, un cadre boss / phase / vie, et une synchronisation entre joueurs du
 groupe (heure du pull, phases, kill). Ce qui lui manque encore par rapport à
 eux tient à la **data**, pas au moteur : voir « Limites assumées ».
+
+En attendant que cette data soit générée, `Modules/BossTimer/Bridge.lua`
+**reprend les barres de DBM et de BigWigs chez ceux qui les ont installés**. Ce
+n'est pas une extraction : rien n'est copié dans le dépôt, rien n'est dérivé. Le
+pont écoute les callbacks publics que les deux addons émettent en jeu — la même
+surface que le trigger `BOSS_MOD` de WeakAuras utilise depuis des années — et
+redessine leurs timers sur les ancres de MyBossSuite. C'est ce qui sépare le
+pont de la phase 3c, fermée : écrire leurs timings dans
+`Modules/BossTimer/Data/` ferait une œuvre dérivée de deux projets *All Rights
+Reserved*, les lire chez le joueur non.
+
+La règle de préséance n'est pas négociable : **la data de MyBossSuite gagne
+toujours**. Le pont ne parle que là où on n'a rien, et une barre reprise porte
+sa source dans son libellé (`DBM`, `BW`) — un chiffre de DBM n'est pas une
+mesure de MyBossSuite. `/mbs boss pont off` le coupe.
+
+Et pour ne pas dépendre d'un boss mod qui tourne, `tools/bossmod-extract` lit
+les modules DBM et BigWigs **installés sur ta machine** et en génère un addon
+compagnon que MyBossSuite charge comme data. Rien n'entre dans ce dépôt : la
+sortie va à côté du client, l'outil refuse tout chemin situé dans le dépôt, et
+le dossier est dans le `.gitignore`. Lire ces chiffres pour son propre usage
+n'est pas les redistribuer sous GPL — voir `tools/bossmod-extract/README.md`.
+
+Trois sources, donc, du plus sûr au moins sûr :
+
+```
+data du dépôt (mesurée)  >  data extraite localement  >  pont DBM/BigWigs live
+```
 
 ## Installation
 
@@ -75,6 +105,8 @@ chaque client charge celui qui correspond à son suffixe.
 | `/mbs boss list [raid\|donjon\|world]` | rencontres connues sur ce client, par nature |
 | `/mbs boss phase <n>` | force la phase (en combat ou en test) si la détection a manqué |
 | `/mbs boss annonces\|compte\|phases\|cadre\|resume\|son\|sync on\|off` | annonces des timers, compte à rebours, annonce de phase, cadre boss/phase, résumé de fin de combat, son, synchronisation de groupe |
+| `/mbs boss pont on\|off` | reprendre (ou non) les barres de DBM/BigWigs là où MyBossSuite n'a pas de data |
+| `/mbs boss` (ligne d'état) | nombre de rencontres extraites localement, et celles que le dépôt couvre déjà |
 | `/mbs alert boss ...` | texte, couleur, taille, son de l'annonce boss (voir ci-dessous) |
 
 ### CD Tracker
@@ -205,6 +237,40 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   timers restreints par phase et par difficulté, annonces, compte à rebours,
   cadre boss/phase/chrono/vie, et fin de combat qualifiée : kill, wipe, reset,
   changement de zone. Format complet dans `Modules/BossTimer/Data/README.md`.
+* **`Modules/BossTimer/Bridge.lua`** — le pont vers les boss mods du joueur.
+  Aucune data n'y est écrite ni extraite : il pose les callbacks publics de DBM
+  (`DBM_TimerStart`, `DBM_TimerStop`, `DBM_TimerUpdate`, `DBM_TimerPause`,
+  `DBM_SetStage`, `DBM_Pull`, `DBM_Kill`, `DBM_Wipe`) et les messages de
+  BigWigs sur `BigWigsLoader` (`BigWigs_StartBar`, `BigWigs_StopBar`,
+  `BigWigs_SetStage`, `BigWigs_OnBossEngage`…), et redessine leurs barres sur
+  une ancre à part. Trois règles le tiennent. **La data maison gagne toujours** :
+  dès qu'un `Engage` réel a lieu, les barres du pont s'effacent et il se tait —
+  deux sources pour la même capacité, c'est une de trop. **Chaque argument reçu
+  est validé** : une durée non numérique ou hors de `]0 s, 1 h]` est comptée en
+  « refusée » et n'affiche rien, de sorte qu'un jour où l'amont réordonne ses
+  arguments on voie un compteur monter plutôt que des barres fausses (`/mbs
+  boss` l'affiche). **Chaque handler commence par le test de préséance**, ce qui
+  rend le décrochage des callbacks facultatif : même laissés en place, ils ne
+  font plus rien. Une barre BigWigs s'identifie par son **texte** et non par sa
+  clé — `BigWigs_StartBar` donne les deux, `BigWigs_StopBar` ne donne que le
+  texte. Et le pont peut ouvrir une rencontre *générique* sur un pull annoncé
+  par le boss mod : sur vanilla, TBC et Wrath, où `ENCOUNTER_START` n'existe
+  pas, c'est le seul chronomètre possible sur un boss dont on n'a pas la data —
+  le moteur maison reprend la main dès qu'un npcId connu agit, sans perdre
+  l'heure du pull.
+* **`Modules/BossTimer/Extracted.lua`** — le point de contact avec la data
+  extraite par `tools/bossmod-extract`. Le générateur n'écrit rien dans ce
+  dépôt : il produit un addon compagnon à côté du client, qui dépose sa data
+  dans une table globale. Passer par un global plutôt que par le namespace de
+  MyBossSuite est ce qui permet aux deux addons de se charger dans n'importe
+  quel ordre, et à celui-ci de rester absent sans qu'aucun test particulier soit
+  nécessaire. Ce fichier ne verse dans `ns.BossTimerData` que les rencontres
+  pour lesquelles le dépôt n'a rien — une entrée relue par quelqu'un passe
+  toujours devant une entrée extraite, même provisoire — et il refuse **en bloc**
+  un compagnon généré pour un autre flavor, plutôt que de charger à moitié : de
+  la data Mists sur un client Cata donnerait des timings faux avec l'air d'être
+  justes. `Unload` retire exactement ce qui avait été versé, pour qu'un
+  changement de profil ne fige rien.
 
 ## Décisions prises
 
@@ -314,6 +380,49 @@ Compat → Scheduler → EventBus → Comm → DB → Anchors → Bars → Alert
   régénérée par `tools/wcl-ingest` avant tout usage sérieux. Ce qui sépare
   encore l'addon d'un DBM à jour, c'est la couverture en data — le moteur, lui,
   sait déjà tout jouer.
+* **La data extraite a l'exactitude de sa source, pas la nôtre.** Ce sont les
+  chiffres de DBM et de BigWigs, avec leur marge d'erreur et leur fraîcheur.
+  Chaque entrée porte `provisional = true` et le nom de sa source, et une entrée
+  du dépôt passe toujours devant. Elle ne rend donc pas la phase 3a inutile : la
+  data mesurée reste ce qui rendra l'addon autonome.
+* **Ce qui n'est pas littéral n'est pas extrait.** Une durée calculée à
+  l'exécution (`self:IsHeroic() and 12 or 20`) ne produit aucun timer, et on ne
+  retombe surtout pas sur la valeur déclarée : le module l'a explicitement
+  remplacée. Sur Classic Era, 233 timers sont écartés à ce titre. Le compteur
+  s'affiche à chaque passage. Un timer absent se remarque et se corrige, un
+  timer faux se croit.
+* **Les phases ne sortent que de BigWigs.** Chez lui, `SetStage(2)` est littéral
+  et le fragment qui le déclenche est déclaré en clair. Chez DBM, le module
+  appelle `SetStage(phase)` avec une variable : rien n'est lisible hors ligne, et
+  aucune phase n'est écrite plutôt qu'une phase inventée. Un boss couvert par
+  DBM seul sort donc avec ses timers et sans ses phases.
+* **La data extraite vieillit avec ta copie de DBM.** Elle est figée au moment
+  de la génération ; une mise à jour de DBM ne la met pas à jour toute seule. Et
+  si ta copie ne couvre pas ton client, il n'y a rien à extraire : sur
+  l'installation `_classic_` (Mists 5.5.4) mesurée ici, aucun pack DBM n'a de
+  `.toc` Mists — l'outil s'arrête plutôt que de générer de la data Cata.
+* **Le pont ne couvre que ceux qui ont déjà un boss mod.** Il emprunte, il ne
+  remplace pas : un joueur sans DBM ni BigWigs ne voit rien de plus qu'avant. Il
+  ne rend donc pas la phase 3a inutile — la data mesurée reste ce qui rendra
+  MyBossSuite autonome, et elle reste prioritaire sur le pont partout où elle
+  existe.
+* **Une barre du pont a l'exactitude de sa source, pas la nôtre.** C'est le
+  chiffre de DBM ou de BigWigs, affiché tel quel, avec leur marge d'erreur et
+  leur fraîcheur. D'où le préfixe `DBM` / `BW` dans le libellé et l'ancre
+  séparée : rien de ce que MyBossSuite n'a pas mesuré ne doit ressembler à une
+  mesure de MyBossSuite.
+* **Les positions d'arguments des callbacks tiers ne sont garanties par
+  personne.** Si DBM ou BigWigs en réordonne un jour, la validation rejette
+  l'événement : la barre n'apparaît pas et le compteur « refusées » de
+  `/mbs boss` monte. C'est le compromis choisi — une barre absente se remarque
+  et se corrige, une barre fausse se croit.
+* **Le pont ne reprend que les barres, les stages et les pulls.** Ni les
+  annonces plein écran, ni les sons, ni les *special warnings* : DBM les émet
+  déjà lui-même chez le joueur, et les doubler serait du bruit, pas de
+  l'information. Un stage repris n'est appliqué qu'à une rencontre *générique*,
+  jamais par-dessus le tableau `phases` d'une data écrite à la main, et il n'est
+  **jamais rediffusé au groupe** : chacun a son propre boss mod, et une phase
+  qu'on n'a pas observée soi-même n'a rien à faire dans `Core/Comm.lua`.
 * **Swing timer** : main-hand uniquement. Les coups de main gauche
   (`isOffHand`, 21e argument de `SWING_DAMAGE`, 13e de `SWING_MISSED`) sont
   reconnus et ignorés : ils ne relancent pas la barre, mais elle ne les affiche
@@ -385,6 +494,7 @@ tools/gen-toc.sh            # régénère les 6 .toc (--check en CI)
 tools/wcl-ingest/wcl_ingest.py --help    # timings boss (--kind raid|dungeon|world)
 tools/wcl-ingest/wcl_alerts.py --help    # sorts kickables + zones à fuir
 tools/wa-extract/wa_extract.py count WeakAuras.lua
+tools/bossmod-extract/bossmod_extract.py --install <client>   # data DBM/BigWigs, locale
 ```
 
 Le `WeakAuras.lua` est dans
@@ -437,13 +547,15 @@ Le `WeakAuras.lua` est dans
   qu'elle puisse être contestée ; `-v` affiche ce qui a été écarté et pourquoi.
 * **`wa-extract`** — répond d'abord à la question qui décide de tout :
   `count` donne la répartition `EVENT` / `BOSS_MOD` de tes auras. Les
-  `BOSS_MOD` sont des wrappers DBM/BigWigs sans durée propre, rien n'en sort ;
-  seules les `EVENT` sur combat log se convertissent (`extract --lua`).
+  `BOSS_MOD` sont des wrappers DBM/BigWigs sans durée propre, rien n'en sort
+  *hors ligne* — c'est justement ce que `Modules/BossTimer/Bridge.lua` va
+  chercher en jeu, à la source ; seules les `EVENT` sur combat log se
+  convertissent en data (`extract --lua`).
 
 ## Tests
 
 ```bash
-tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion + .toc
+tests/run.sh        # syntaxe + suite headless (4 clients simulés) + ingestion + extraction + .toc
 ```
 
 Prérequis : `lua5.1` (ou `lua`) et `python3` dans le `PATH`.
@@ -456,7 +568,17 @@ mort pendant que le groupe se bat, wipe) et un world boss (engage par un autre
 joueur, conseil à deux boss, emote, aura sur toi, compte à rebours, reset par
 inactivité), et la synchronisation est jouée avec un pair simulé (pull adopté,
 phase reçue, kill reçu, arrivée en cours de combat, demande d'état, échos et
-versions étrangères ignorés). Ça ne remplace pas un test en jeu, mais ça
+versions étrangères ignorés). Le pont boss mod a ses propres faux DBM et faux
+BigWigs, chargés *après* l'addon comme en jeu : ce qui est vérifié là n'est pas
+DBM, c'est que MyBossSuite lit correctement ce que DBM lui envoie, refuse ce qui
+n'a pas la bonne forme, et se tait dès qu'une rencontre a de la data.
+`tests/test_bossmod_extract.py` fait le pendant hors du jeu, sur des fixtures qui
+reproduisent ce qui casse un lecteur de source naïf : un mot-clé de bloc dans un
+commentaire, une virgule dans une chaîne au milieu d'une liste d'arguments,
+`while ... do` et `for ... do` qui ne doivent compter qu'une fois, une durée
+calculée à l'exécution qui ne doit produire aucun timer, et l'identité d'une
+barre BigWigs — son texte, pas sa clé. Ça ne
+remplace pas un test en jeu, mais ça
 attrape les régressions de logique sans lancer WoW. Les cas qui ont déjà
 cassé en sont : coup de main gauche sur le swing timer, mort du joueur au
 milieu d'un pull, cast de PNJ annulé sans trace dans le combat log, forme

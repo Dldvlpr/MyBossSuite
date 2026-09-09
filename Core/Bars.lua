@@ -58,6 +58,7 @@ end
 function BarMixin:SetRemaining(remaining)
     self.endTime = GetTime() + remaining
     if remaining > self.duration then self.duration = remaining end
+    if remaining > 0 then self.expired = false end
 end
 
 function BarMixin:GetRemaining()
@@ -125,6 +126,7 @@ function GroupMixin:Release(bar)
     bar:ClearAllPoints()
     bar.id = nil
     bar.onExpire = nil
+    bar.expired = false
     self.pool[#self.pool + 1] = bar
 end
 
@@ -150,6 +152,7 @@ function GroupMixin:StartBar(id, duration, text, icon, opts)
     bar.warned       = false
     bar.onExpire     = opts.onExpire
     bar.keepOnExpire = opts.keepOnExpire
+    bar.expired      = false
 
     -- Un timing incertain ne doit pas s'afficher comme un timing mesure.
     bar.label:SetText(bar.variable and ("~" .. bar.text) or bar.text)
@@ -231,8 +234,14 @@ function GroupMixin:OnUpdate()
         local bar = self.order[i]
         local remaining = bar.endTime - now
         if remaining <= 0 then
-            expired = expired or {}
-            expired[#expired + 1] = bar
+            -- Une barre `keepOnExpire` reste dans la liste apres son echeance :
+            -- sans ce drapeau elle repasserait pour expiree a chaque image, et
+            -- son `onExpire` serait rappele soixante fois par seconde.
+            if not bar.expired then
+                bar.expired = true
+                expired = expired or {}
+                expired[#expired + 1] = bar
+            end
         else
             bar.bar:SetValue(remaining / bar.duration)
             bar.timeText:SetText(FormatTime(remaining))

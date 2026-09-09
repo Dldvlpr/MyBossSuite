@@ -278,6 +278,71 @@ function Mock.FireCombatLog(subevent, srcGUID, dstGUID, ...)
 end
 
 --------------------------------------------------------------------------------
+-- Boss mods tiers (pont DBM / BigWigs)
+--------------------------------------------------------------------------------
+-- Faux DBM et faux BigWigs, reduits a ce que le pont utilise : poser un
+-- callback, le retirer, le declencher. Ce qui est verifie ici n'est pas DBM —
+-- c'est que MyBossSuite lit correctement ce que DBM lui envoie, et refuse ce
+-- qui n'a pas la bonne forme.
+--
+-- Les deux repassent le nom de l'evenement en premier argument, comme en jeu
+-- (DBM le fait explicitement, BigWigs par CallbackHandler).
+
+Mock.bossMods = { dbm = {}, bw = {} }
+
+function Mock.InstallDBM()
+    local callbacks = {}
+    _G.DBM = {
+        RegisterCallback = function(_, event, fn)
+            callbacks[event] = callbacks[event] or {}
+            table.insert(callbacks[event], fn)
+        end,
+        UnregisterCallback = function(_, event, fn)
+            local list = callbacks[event]
+            if not list then return end
+            for i = #list, 1, -1 do
+                if list[i] == fn then table.remove(list, i) end
+            end
+        end,
+    }
+    Mock.bossMods.dbm = callbacks
+end
+
+function Mock.FireDBM(event, ...)
+    local list = Mock.bossMods.dbm[event]
+    if not list then return 0 end
+    for i = 1, #list do list[i](event, ...) end
+    return #list
+end
+
+function Mock.InstallBigWigs()
+    -- CallbackHandler indexe par (message, cible) : une cible ne peut avoir
+    -- qu'un handler par message, ce que le pont respecte avec sa table relais.
+    local registry = {}
+    _G.BigWigsLoader = {
+        RegisterMessage = function(target, message, fn)
+            registry[message] = registry[message] or {}
+            registry[message][target] = fn
+        end,
+        UnregisterMessage = function(target, message)
+            if registry[message] then registry[message][target] = nil end
+        end,
+    }
+    Mock.bossMods.bw = registry
+end
+
+function Mock.FireBigWigs(message, ...)
+    local list = Mock.bossMods.bw[message]
+    if not list then return 0 end
+    local fired = 0
+    for _, fn in pairs(list) do
+        fn(message, ...)
+        fired = fired + 1
+    end
+    return fired
+end
+
+--------------------------------------------------------------------------------
 -- Frames
 --------------------------------------------------------------------------------
 

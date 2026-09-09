@@ -7,10 +7,12 @@
 #   5. bornes de phase (une mesure fausse serait pire que pas de mesure)
 #   6. identifiants WCL (.env et environnement, priorite et parsing)
 #   7. OAuth utilisateur WCL (state CSRF, cache de jeton, endpoints)
-#   8. inventaire WeakAuras (c'est lui qui decide si la phase 3b vaut le coup)
-#   9. .toc a jour vis-a-vis de tools/gen-toc.sh
+#   8. extraction depuis les boss mods installes (lecture de source Lua)
+#   9. inventaire WeakAuras (c'est lui qui decide si la phase 3b vaut le coup)
+#  10. .toc a jour vis-a-vis de tools/gen-toc.sh
 #
-# Prerequis : lua5.1 (ou lua) et python3 dans le PATH.
+# Prerequis : lua5.1 (ou lua) et python3 (ou python, ou py -3) dans le PATH.
+# Les deux interpreteurs se surchargent : LUA=... PY=... tests/run.sh
 
 set -uo pipefail
 
@@ -24,6 +26,22 @@ if [ -z "$LUA" ]; then
 fi
 if [ -z "$LUA" ]; then
     echo "aucun interpreteur Lua trouve (installe lua5.1)" >&2
+    exit 2
+fi
+
+# Sous Windows, `python3` est le plus souvent le raccourci du Microsoft Store :
+# il existe dans le PATH, il sort en erreur, et les tests Python defilaient sans
+# rien dire. On resout l'interpreteur comme celui de Lua, en verifiant qu'il
+# repond vraiment.
+PY="${PY:-}"
+if [ -z "$PY" ]; then
+    for candidate in python3 python "py -3"; do
+        # shellcheck disable=SC2086
+        if $candidate -c "import sys" >/dev/null 2>&1; then PY="$candidate"; break; fi
+    done
+fi
+if [ -z "$PY" ]; then
+    echo "aucun interpreteur Python 3 trouve (installe python3)" >&2
     exit 2
 fi
 
@@ -71,7 +89,7 @@ done
 
 echo
 echo "== ingestion WCL (logique de classement, sans reseau)"
-if output=$(python3 tests/test_wcl_alerts.py 2>&1); then
+if output=$($PY tests/test_wcl_alerts.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
@@ -80,7 +98,7 @@ fi
 
 echo
 echo "== ingestion WCL (fusion a la regeneration, sans reseau)"
-if output=$(python3 tests/test_wcl_merge.py 2>&1); then
+if output=$($PY tests/test_wcl_merge.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
@@ -89,7 +107,7 @@ fi
 
 echo
 echo "== ingestion WCL (bornes de phase, sans reseau)"
-if output=$(python3 tests/test_wcl_phases.py 2>&1); then
+if output=$($PY tests/test_wcl_phases.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
@@ -98,7 +116,7 @@ fi
 
 echo
 echo "== ingestion WCL (identifiants : .env et environnement)"
-if output=$(python3 tests/test_wcl_env.py 2>&1); then
+if output=$($PY tests/test_wcl_env.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
@@ -107,7 +125,7 @@ fi
 
 echo
 echo "== ingestion WCL (fenetre temporelle des events, sans reseau)"
-if output=$(python3 tests/test_wcl_events.py 2>&1); then
+if output=$($PY tests/test_wcl_events.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
@@ -116,7 +134,7 @@ fi
 
 echo
 echo "== ingestion WCL (OAuth utilisateur, sans reseau)"
-if output=$(python3 tests/test_wcl_auth.py 2>&1); then
+if output=$($PY tests/test_wcl_auth.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
@@ -124,8 +142,18 @@ else
 fi
 
 echo
+echo "== extraction boss mod (lecture de source, sans DBM ni BigWigs)"
+if output=$($PY tests/test_bossmod_extract.py 2>&1); then
+    echo "  ok   $(printf '%s' "$output" | tail -n 1)"
+else
+    printf '%s
+' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'
+    status=1
+fi
+
+echo
 echo "== inventaire WeakAuras (parsing, sans reseau)"
-if output=$(python3 tests/test_wa_extract.py 2>&1); then
+if output=$($PY tests/test_wa_extract.py 2>&1); then
     echo "  ok   $(printf '%s' "$output" | tail -n 1)"
 else
     printf '%s\n' "$output" | grep -E "FAIL|Error|Traceback" | sed 's/^/        /'

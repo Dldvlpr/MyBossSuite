@@ -196,9 +196,15 @@ try:
 
     lua_bin = shutil.which("lua5.1") or shutil.which("lua")
     if lua_bin:
-        result = subprocess.run([lua_bin, "-e", "assert(loadfile('%s'))" % tmp],
-                                capture_output=True, text=True)
-        ok(result.returncode == 0, "le fichier emis est du Lua valide")
+        # Chemin en crochets longs et en slashes : sous Windows un chemin brut
+        # ("tests\_tmp_render.lua") passerait pour une suite d'echappements Lua
+        # et le test echouerait sur un fichier introuvable, pas sur sa syntaxe.
+        result = subprocess.run(
+            [lua_bin, "-e", "assert(loadfile([[%s]]))" % tmp.as_posix()],
+            capture_output=True, text=True)
+        ok(result.returncode == 0,
+           "le fichier emis est du Lua valide" + (
+               "" if result.returncode == 0 else " — " + result.stderr.strip().splitlines()[0]))
     else:
         print("  --   interpreteur Lua absent : validite syntaxique non verifiee")
 finally:

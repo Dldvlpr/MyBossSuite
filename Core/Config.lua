@@ -239,7 +239,7 @@ local HELP = {
     "  |cffffff00/mbs test|r [anchorKey] — barres factices sur toutes les ancres",
     "  |cffffff00/mbs test stop|r — arrete le mode test",
     "  |cffffff00/mbs test boss <npcId>|r — rejoue la timeline d'un boss hors combat",
-    "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume|sync on/off]",
+    "  |cffffff00/mbs boss|r [status|list [raid|donjon|world]|phase <n>|annonces|compte|phases|cadre|resume|sync|pont on/off]",
     "  |cffffff00/mbs cd|r [status|list|sync|barres|annonce|soi|kick|estimes on/off]",
     "  |cffffff00/mbs rotation|r [status|list|reset|cadre|combat|retenue on/off|delai <s>]",
     "  |cffffff00/mbs anchor|r [<spellId>|remove <spellId>] — ancre dediee pour les barres d'un sort",
@@ -665,6 +665,7 @@ local BOSS_FLAGS = {
     resume = "summary", summary = "summary",
     son = "sound", sound = "sound",
     sync = "sync", synchro = "sync",
+    pont = "bridge", bridge = "bridge", dbm = "bridge", bigwigs = "bridge",
 }
 
 local function HandleBoss(arg1, arg2)
@@ -723,7 +724,7 @@ local function HandleBoss(arg1, arg2)
     local field = BOSS_FLAGS[option]
     if not field then
         ns.Print("usage : /mbs boss [status | list [raid|donjon|world] | phase <n> | "
-            .. "annonces|compte|phases|cadre|resume|son|sync on|off]")
+            .. "annonces|compte|phases|cadre|resume|son|sync|pont on|off]")
         return
     end
 
@@ -731,6 +732,11 @@ local function HandleBoss(arg1, arg2)
     if bool == nil then bool = not (config[field] ~= false) end
     config[field] = bool
     if field == "phaseFrame" and not bool then module:HidePhaseFrame() end
+    -- Couper le pont doit effacer ce qu'il a deja mis a l'ecran, pas seulement
+    -- l'empecher d'en remettre.
+    if field == "bridge" and not bool and ns.BossTimerBridge then
+        ns.BossTimerBridge:Clear()
+    end
     PrintStatus(module)
 end
 
